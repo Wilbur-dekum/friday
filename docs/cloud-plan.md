@@ -3,8 +3,8 @@
 Friday becomes a SaaS product: one **Deployment** (container stack + Postgres) per
 customer **Organization**, several **User**s collaborating through one shared Friday,
 reachable over multiple **Transport**s. Vocabulary lives in [CONTEXT.md](../CONTEXT.md);
-rationale in [ADR-050 — ADR-054](decisions.md); constraints and findings in
-[roadmap.md](roadmap.md) § Cloud / SaaS.
+rationale in [ADR-050 — ADR-054](decisions.md); the work itself, with the constraint each
+ticket must respect, in [cloud-tickets.md](cloud-tickets.md).
 
 **Three docs, three jobs** — keep them from drifting: ADRs own _why_ and what was
 rejected. [cloud-tickets.md](cloud-tickets.md) owns _the work_ — all 51 tickets
