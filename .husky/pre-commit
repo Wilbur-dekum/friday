@@ -16,3 +16,12 @@
 # fix and want to skip the build, pass `--no-verify` — but the default is
 # to never trust dist drift past a commit boundary.
 pnpm exec turbo build --filter=./packages/**
+
+# Lint + format were enforced only in CI, so a local commit could pass the hook
+# and still fail the build on style. Both are cheap enough to gate on (~10s and
+# ~5s against turbo's near-free cached build) and they catch the two classes tsc
+# cannot: unused imports (eslint — `noUnusedLocals` is off) and formatting that
+# drifts when an edit changes a line's length (prettier). Same `--no-verify`
+# escape hatch as the build above.
+pnpm lint
+pnpm format:check
