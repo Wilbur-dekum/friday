@@ -6,7 +6,8 @@ The same tickets are loaded into Friday's own `tickets` table so Friday can work
 them functionally, but that copy is operational — it lives in one Postgres
 database, while this one is in git. If the two ever disagree, this wins.
 
-Ids are pre-assigned `FRI-2001`–`FRI-2051`. The counter was seeded past the
+Ids run from `FRI-2001`. The first 51 were the initial plan; later ids are work
+uncovered while executing it, filed under the epic they belong to. The counter was seeded past the
 external tracker's range (~200 `FRI-nnn` identifiers are already referenced
 throughout these docs) so locally-created ids cannot collide; see the
 short-UUID entry in [decisions.md](decisions.md) § Watch list for the durable
@@ -50,12 +51,47 @@ unknown at once.
 
 `task` · parent FRI-2001 · ADR-050
 
-`pack.mjs`'s `platformTag()` refuses any non-darwin arch and there is no Linux
-leg anywhere in CI. Native addons are per-arch with no cross-compile
-(`better-sqlite3`, `@rocicorp/zero-sqlite3`, `sharp`, `@oxfmt/binding`), so the
-image must be built on the target arch. Retires the darwin tarball as the
-_product_ artifact — it survives only as the enterprise/self-hosted install
-path.
+CORRECTION (2026-10-14): an earlier version of this ticket said
+`pack.mjs`'s `platformTag()` "refuses any non-darwin arch". It does not — its
+`osMap` is `{ darwin, linux }` and it fails only on an unrecognised _arch_. The
+real gap is narrower: there is no Linux leg in the release matrix
+(`.github/workflows/release-publish.yml` ships darwin arm64 + x64 only).
+
+That reframes the work. ADR-050 makes the **container** the unit of deployment,
+so Friday does not need a Linux _tarball_ at all — `pack.mjs` and the tarball
+stay as the darwin enterprise/self-hosted install path, untouched. This ticket
+is a Dockerfile and an image build.
+
+Chosen approach: the Dockerfile runs `pnpm install --frozen-lockfile` and
+`pnpm run build` inside a builder stage, rather than staging a tree with
+`pack.mjs` and COPYing it in. Self-contained and standard, and it sidesteps
+upgrade gotcha #5 entirely — nothing is relocated, so there are no absolute
+symlinks to rewrite.
+
+Constraints that hold either way:
+
+- **No cross-compile.** `better-sqlite3`, `@rocicorp/zero-sqlite3`, `esbuild`
+  and `sharp` resolve prebuilds by `process.arch`, so build on the target arch
+  or via `buildx --platform`.
+- **Postgres stays out of the image** (ADR-050): `CREATE EXTENSION vector`
+  needs SUPERUSER, `wal_level=logical` is server-level, and it is the only
+  canonical state — a container restart must never sit in front of the
+  customer's only copy of their data.
+- **Runtime packages `node:*-slim` omits.** `procps` is required because the
+  supervisor and worker teardown shell out to `pgrep -P` / `pgrep -g`; `git`
+  for builder worktrees and the bare mirrors under `$FRIDAY_DATA_DIR/repos`;
+  `bash` because `lifecycle.ts` spawns `/bin/bash -c '<ulimit prelude>; exec
+"$@"'`.
+- **`HOME` needs a volume, not just `FRIDAY_DATA_DIR`.** The SDK writes session
+  transcripts to `$HOME/.claude/projects/<cwd>/<id>.jsonl`, outside the data
+  dir; without them every Conversation silently starts fresh after a deploy
+  (FRI-2007).
+
+Definition of done is "the image builds and starts the supervisor" — not "comes
+up healthy". It cannot yet: FRI-2003 still has to replace the Homebrew gating in
+`checkDeps`, which hard-fails in a container and makes the supervisor _park_ the
+stack rather than fail loudly. The `claude` CLI is also deliberately absent —
+agent auth is ADR-051's Capacity source decision, not a packaging one.
 
 ### FRI-2003 — Replace Homebrew preflight with a container-appropriate `checkDeps`
 
@@ -230,6 +266,53 @@ continuously instead of built blind at the end.
 **Gated on verified row counts against the pre-cutover database, not on the
 stack booting.** Booting proves nothing here: empty tables boot fine. Take a
 `friday backup` immediately before and confirm the bundle restores.
+
+---
+
+### FRI-2053 — Log to stdout in a container, not only to files
+
+`task` · parent FRI-2001 · ADR-050, ADR-051
+
+Discovered running the FRI-2002 image: `docker logs` is **empty**. The
+supervisor writes only to `$FRIDAY_DATA_DIR/logs/supervisor.jsonl`, and the
+daemon, dashboard and zero-cache each write their own files alongside it.
+
+Container platforms collect stdout/stderr. File-only logging means no log
+aggregation for any **Deployment**, which is the concrete form of the "no
+observability" risk ADR-051 names — and ADR-051 also needs per-Deployment
+migration telemetry and synthetic health probes, none of which can reach us
+through a file inside a container.
+
+Two aggravating details: the log files sit on the Deployment's volume and grow
+unbounded, and `backup.ts`'s `FULL_EXCLUDE` deliberately drops `logs/` — so
+they are neither collected nor backed up.
+
+Fix: emit JSONL on stdout (the format is already right for collectors) when
+running in a container, either by switching destination on an env flag or by
+dual-writing. Covers all four processes, not just the supervisor.
+
+### FRI-2054 — Prune the container image (currently 1149 MB)
+
+`task` · parent FRI-2001 · ADR-050, ADR-051
+
+The FRI-2002 image is **1149 MB**. The builder stage runs a full
+(non-prod) `pnpm install` so turbo can build, and the runtime stage then
+`COPY --from=builder /app /app` wholesale — so dev dependencies, TypeScript
+sources and build caches all ship.
+
+Options, roughly in order of payoff: a prod-only dependency tree in the runtime
+stage (`pnpm prune --prod`, or a separate prod install); drop sources,
+`tsconfig`s and test files; copy only each package's `dist`/`build` plus the
+prod `node_modules`.
+
+Constraint to respect: the supervisor's `findRepoRoot()` walks up looking for
+`pnpm-workspace.yaml`, so whatever the runtime layout becomes must still contain
+that file at the tree root.
+
+Worth folding in while here: the ~23 MB embedding model (quantized ONNX,
+all-MiniLM-L6-v2) is fetched at setup/update into `$FRIDAY_DATA_DIR/models/`.
+Baking it into the image instead means Deployments do not each download it, and
+semantic recall works on first boot rather than degrading fail-open to FTS.
 
 ---
 

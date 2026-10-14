@@ -1,0 +1,23 @@
+# Build context hygiene — keep host-arch artifacts and local state out of the
+# image. node_modules especially: host (darwin) native addons must never be
+# copied into a linux image; the builder stage installs its own.
+node_modules
+**/node_modules
+dist
+**/dist
+build
+**/build
+.svelte-kit
+**/.svelte-kit
+.turbo
+**/.turbo
+coverage
+**/coverage
+.git
+.github
+*.tar.gz
+.DS_Store
+# Local Friday state — never baked into an image.
+.friday
+.env
+.env.local
