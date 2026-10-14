@@ -164,14 +164,37 @@ the supported target.
 
 `task` · parent FRI-2001 · ADR-054
 
-Pulled forward from the isolation epic because it is cheap and it closes a
-credential-exposure path that exists **today**, not a future one. Worker env is
-built as `{...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", CI: "1"}` and
-the SDK additionally receives `{...process.env, ...shellEnv}` — so the daemon's
-`DATABASE_URL` and daemon secret are in the environment of every worker, and any
-postinstall script in any customer lockfile can read them with
-`console.log(process.env)`. Replace with an explicitly constructed env. ADR-054
-control 1; a launch gate.
+Pulled forward from the isolation epic: the worker env has to be constructed
+explicitly for a container anyway, since there is no login shell to capture.
+
+CORRECTION (2026-10-14): an earlier version of this ticket claimed the daemon's
+`process.env` carries `DATABASE_URL` and the daemon secret into every worker. It
+does not. `getDaemonSecret()` reads `~/.friday/.daemon-secret` and
+`DATABASE_URL` comes from `loadFridayConfig()` reading `.env.local`, so ADR-037
+already keeps `process.env` clean of both. Measured on the dev box: the daemon
+has 20 environment variables and none of them is a secret.
+
+What this control actually addresses — both real, both narrower:
+
+1. **`SSH_AUTH_SOCK` is forwarded into every worker**, sandboxed builders
+   included. No credential is readable, but the capability is delegated:
+   anything in the worker, a postinstall script included, can authenticate as
+   the operator over SSH to any host or repository their keys reach.
+
+2. **The `$SHELL -ilc` capture makes the worker env a function of the
+   operator's dotfiles.** `captureShellEnv()` at worker.ts:84 is applied at
+   worker.ts:521 as `{ ...process.env, ...shellEnv }` — measured, 20 variables
+   becomes 65. Unbounded and machine-dependent: a developer who exports
+   `GITHUB_TOKEN` or `ANTHROPIC_API_KEY` from `.zshrc` forwards it into every
+   worker. Untenable once the worker runs untrusted customer code.
+
+Fix: construct the worker env from a known allowlist (PATH, HOME, LANG, TMPDIR,
+the COREPACK/CI overrides, plus whatever the toolchain genuinely needs) instead
+of spreading `process.env`, and drop `SSH_AUTH_SOCK` unless a task explicitly
+needs git over SSH. Pairs with FRI-2008, which removes the shell capture — do
+them together, since the capture is the larger half of the surface.
+
+Not the emergency the original framing implied; an ordinary E1 item.
 
 ### FRI-2013 — Data migration path to external Postgres
 
