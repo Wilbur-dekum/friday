@@ -7,9 +7,10 @@ rationale in [ADR-050 — ADR-054](decisions.md); constraints and findings in
 [roadmap.md](roadmap.md) § Cloud / SaaS.
 
 **Three docs, three jobs** — keep them from drifting: ADRs own _why_ and what was
-rejected. `roadmap.md` owns the _constraints and findings_ each epic must respect (and
-drains into ticket bodies as tickets are written). This doc owns _epics, order, and what
-can run in parallel_. Nothing here restates a decision; it links to one.
+rejected. [cloud-tickets.md](cloud-tickets.md) owns _the work_ — all 51 tickets
+(`FRI-2001`–`FRI-2051`), each carrying the constraint it has to respect, and it is the
+canonical record of the plan. This doc owns _epics, order, and what can run in parallel_.
+Nothing here restates a decision; it links to one.
 
 ## Strategy: dogfood first
 
@@ -25,6 +26,8 @@ Homebrew, so there is no Linux target to verify against until it lands.
 ## Epics
 
 ### E1 — Dev–cloud parity: the container
+
+FRI-2001 · tasks FRI-2002–2014
 
 **Goal.** The stack runs as one container (supervisor as PID 1) against external Postgres,
 from the same image the cloud will use.
@@ -51,6 +54,8 @@ harden. Doing all of the above before the first boot attempt front-loads every u
 
 ### E2 — Multi-user in one Deployment
 
+FRI-2015 · tasks FRI-2016–2028
+
 **Goal.** Several Users share one Friday: identity, **Role**, **Scope**, per-User
 **Conversation**s.
 **Done when** a second account can be added, holds its own Conversation, and cannot read
@@ -66,6 +71,8 @@ prerequisite that unblocks E2 and E3 together.
 
 ### E3 — Transports
 
+FRI-2029 · tasks FRI-2030–2035
+
 **Goal.** **Transport** as a first-class concept with per-Transport **Transport style**;
 Slack first.
 **Done when** a Slack thread drives a turn and Friday replies into it, as the right User.
@@ -78,6 +85,8 @@ prerequisite — which is what keeps E3 off the Control plane's critical path.
 
 ### E4 — Agent isolation
 
+FRI-2036 · tasks FRI-2037–2043
+
 **Goal.** Agent execution moves into containers; the container is the sandbox.
 **Done when** builders run in per-task containers with egress deny-by-default, and the
 remaining four [ADR-054](decisions.md) controls are in place.
@@ -89,6 +98,8 @@ is built as a protocol seam from the start — `wakeAgent` is IPC and `killDesce
 walks `pgrep -P`, so both become a network protocol and a container lifecycle.
 
 ### E5 — Control plane
+
+FRI-2044 · tasks FRI-2045–2051
 
 **Goal.** The second application: marketing, registration, billing, legal, support,
 provisioning, fleet upgrade, the central webhook shim, **Usage cap** ceilings and the kill

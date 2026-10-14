@@ -400,6 +400,7 @@ Verifies the data dir, config, db migrations, account presence, external CLIs, a
 | [docs/decisions.md](docs/decisions.md)                   | Architecture Decision Records (ADRs) + watch list                                                                  |
 | [docs/roadmap.md](docs/roadmap.md)                       | Open work, sequenced for execution                                                                                 |
 | [docs/cloud-plan.md](docs/cloud-plan.md)                 | Cloud/SaaS project plan: epics, sequencing, parallelization                                                        |
+| [docs/cloud-tickets.md](docs/cloud-tickets.md)           | Canonical verbose cloud/SaaS plan: all tickets with their constraints                                              |
 | [docs/setup.md](docs/setup.md)                           | Full setup including Cloudflare Tunnel walkthrough                                                                 |
 | [docs/running.md](docs/running.md)                       | Daily commands, modes, data layout, cutover from old Friday                                                        |
 | [docs/self-hosted-runner.md](docs/self-hosted-runner.md) | Intel x64 self-hosted GitHub Actions runner that builds the `darwin-x64` release leg                               |
