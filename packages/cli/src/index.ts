@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { defineCommand, runMain } from "citty";
-import { clearFridayConfigCache, warmVaultCache } from "@friday/shared";
+import { clearFridayConfigCache, closeDb, warmVaultCache } from "@friday/shared";
 import pkg from "../package.json" with { type: "json" };
 import { setupCommand } from "./commands/setup.js";
 import { doctorCommand } from "./commands/doctor.js";
@@ -51,6 +51,19 @@ const main = defineCommand({
   async setup() {
     await warmVaultCache();
     clearFridayConfigCache();
+  },
+  // FRI-2052: close the pg pool once the subcommand resolves. `getDbAndPool()`
+  // builds a Pool with `idleTimeoutMillis: 30_000`; without an explicit
+  // `pool.end()` the idle client keeps a live socket on the event loop and Node
+  // refuses to exit until that timer fires — so every DB-touching command did
+  // its work in well under a second and then sat for a further 30. Same
+  // reasoning as `setup()` above: doing it once at the root means no subcommand
+  // has to remember, which eliminates the bug class instead of patching each
+  // site (`doctor` was the only command that had remembered). `closeDb()` is a
+  // no-op when no pool was ever created, so launchctl-only commands like
+  // `start`/`stop` are unaffected.
+  async cleanup() {
+    await closeDb();
   },
   subCommands: {
     setup: setupCommand,
