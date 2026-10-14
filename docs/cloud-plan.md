@@ -45,9 +45,10 @@ volume · a local reverse proxy with a real hostname so BetterAuth's `trustedOri
 behaves as it will in the cloud.
 
 **Pulled forward into E1:** scrub the worker environment ([ADR-054](decisions.md) control 1).
-It belongs to the isolation epic, but it is cheap and it closes a credential-exposure path
-that exists _today_ — `{...process.env}` carries `DATABASE_URL` and the daemon secret into
-every worker.
+It belongs to the isolation epic, but it is cheap and the worker env has to be constructed
+explicitly for a container anyway — there is no login shell to capture. It forwards
+`SSH_AUTH_SOCK` (delegating the operator's SSH agent to every worker) and makes the worker
+env a function of their dotfiles, which cannot stand once the worker runs untrusted code.
 
 **Ordering within E1:** get the stack booting in a container early, even imperfectly, then
 harden. Doing all of the above before the first boot attempt front-loads every unknown.
