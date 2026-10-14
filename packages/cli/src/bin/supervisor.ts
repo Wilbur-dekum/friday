@@ -51,12 +51,7 @@ import {
   zeroCacheCli,
   zeroCacheCwd,
 } from "../lib/zero-cache.js";
-import {
-  checkDeps,
-  clearBlockedState,
-  writeBlockedState,
-  type DepReport,
-} from "../lib/deps.js";
+import { checkDeps, clearBlockedState, writeBlockedState, type DepReport } from "../lib/deps.js";
 
 // ---- Layout -----------------------------------------------------------
 
