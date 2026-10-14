@@ -38,6 +38,12 @@ A docs-only change still warrants a commit with scope `docs`. A code change that
 
 ## Design Principles
 
+- **Agency asymptotic to zero.** Every LLM invocation is the most expensive, least reproducible, and least auditable way to accomplish a task. Prefer spending an agent _once_ to write the code that makes an agent unnecessary _next_ time, over treating an agent as the runtime for recurring work. The agent is a compiler from intent to code, not an interpreter you re-run.
+  - **Scope.** Applies to _specifiable_ work — anything with a correct answer you could write down. Novel judgment over open context is what agents are for; do not try to code-generate that away. The asymptote is over the specifiable fraction, which grows as the system learns its own patterns.
+  - **Trigger: recurrence, not first sight.** Building the tool for a one-off is the speculative abstraction we otherwise forbid. The second or third occurrence of the same shape is the signal.
+  - **In practice.** An MCP tool is this principle in action: deterministic code the agent calls instead of re-reasoning, so each tool lowers agentic load permanently. ADR-047 is one rung down the ladder (orchestrator-in-context → one cheap classifier call); the next rung is deterministic routes for patterns that recur, with the classifier as fallback. The evolve pipeline's sharpest purpose is exactly this — notice that an agent keeps being asked to do X, then emit the tool so X stops needing one. Bulk or mechanical work (loading N rows, reformatting, migrating) should never be agent-driven: one transaction beats N tool calls on cost, speed, atomicity, and repeatability.
+  - **It is also an audit property.** Under ADR-051/ADR-053 a code gate can be tested, logged, and attributed to a **User**; an LLM deciding authority cannot. Determinism buys security, not just cost.
+
 - **Preserve over delete.** Default to keeping data. Patch and update rather than delete.
 - **Workspace containment.** Builders work exclusively in their assigned worktrees.
 - **User approval gates.** The orchestrator confirms plans with the user before creating Builders.
