@@ -5,6 +5,110 @@ SvelteKit dashboard, and the shared packages that bind them.
 
 ## Language
 
+### Deployment and identity
+
+**Deployment**:
+One running Friday stack — daemon, zero-cache, dashboard, and one Postgres
+database — serving exactly one **Organization**. Provisioned, upgraded, and
+torn down by the **Control plane**, one per paying customer. The unit of
+isolation: two Organizations never share a Deployment, and there is no tenancy
+_within_ one.
+_Avoid_: tenant (a Deployment is a customer's whole stack, not a row scope),
+instance (acceptable synonym), install (reserve for the act of installing),
+machine (a Deployment is not tied to one host).
+
+**Organization**:
+The single company a **Deployment** serves. A stored entity — one row, created
+by setup alongside the first **User** — holding what is true of the company
+rather than of any person: its name, its SSO domain allowlist, the org-owned
+SOUL. But deliberately **not** a row scope: there is no `org_id` column on any
+domain table, because one Deployment is one Organization by construction. The
+**Control plane** holds the cross-Organization record; a Deployment knows only
+its own.
+_Avoid_: tenant (implies many per Deployment — there is exactly one), workspace,
+team, account (that's the BetterAuth credential record), company (informal use
+is fine).
+
+**User**:
+A human with an account on a **Deployment** (a BetterAuth `user` row). An
+**Organization** has several; they collaborate through one shared Friday rather
+than each holding their own. Distinct from "the user" as the prompt stack uses
+it — that phrase assumes a single human and predates this concept.
+_Avoid_: account (that's the BetterAuth credential record), member, employee
+(informal use is fine), owner.
+
+**Control plane**:
+The single multi-tenant application that sits above every **Deployment** —
+public marketing, signup, billing, legal, and support surfaces, plus the
+provisioning and upgrade machinery that creates and maintains Deployments. The
+only component that spans **Organization**s, and the only one a prospective
+customer meets before they have a Deployment. A Deployment never talks to
+another Deployment; it talks only to the Control plane.
+_Avoid_: dashboard (that's the per-Deployment UI), admin (too vague),
+orchestrator (taken — that's an agent type), fleet manager, mothership.
+
+**Conversation**:
+A thread of **Turn**s between one **User** and one agent. The unit a human
+actually experiences; the agent is shared, the Conversation is not. One agent
+has many Conversations — which is why per-**User** privacy is modelled here and
+never as per-User agents (`agents.name` is a primary key that `mail`, `blocks`,
+and `read_cursors` all reference by bare string, so there can only ever be one
+`orchestrator`). Keyed by **User** and agent, **not** by **Transport**: one
+continuous thread that Slack, email, and the web dashboard are all doorways
+into. Carries one Claude SDK session, so continuity is structural rather than
+reconstructed from **memory**, which stays shared across the **Organization**.
+_Avoid_: thread (reserve for the _external_ thread a **Transport** maps onto —
+a Slack `thread_ts`, an email `Message-ID` chain), chat (the UI surface, not the
+entity), session (that's the SDK's per-Conversation handle, not the Conversation
+itself), channel.
+
+**Role**:
+A **User**'s authority within their **Organization** — `admin | member`. Owned
+by the **Control plane** (where membership and billing already live) and carried
+in the login assertion, then mirrored into the **Deployment** so the tool gate
+reads it without a network call per turn. An admin installs Friday Apps, manages
+agents and schedules, reads secrets, and configures SSO and the org SOUL; a
+member converses and uses the core tools. Orthogonal to _agent type_, which gates
+which tools an **agent** may call: the effective gate is agent type × Role.
+_Avoid_: permission (that's the finer-grained future model), scope (taken —
+that's the personal/org data axis), tier, plan (that's billing), admin (the
+value, not the concept).
+
+**Scope**:
+Whether a row belongs to one **User** or to the whole **Organization** —
+`personal | org`. The boundary intuition is "conversations and personal records
+are mine, work artifacts are ours": **Conversation**s, `inbox_items`, **Habit**s
+and their **Check-in**s, and the per-user half of settings (**Theme**,
+**Notification policy**, **DND**) are personal; agents, tickets, mail,
+schedules, Apps, and **memory** are org. Memory being org-wide is a deliberate
+stance, not an oversight — one shared brain is the point of a company assistant,
+so a sensitive thing said in one **User**'s Conversation can reach another's
+recall once the nightly consolidation pass has run.
+_Avoid_: visibility (that's the UI consequence), private (ambiguous — personal
+rows are still readable by the **Deployment**'s operators), tenant, role (that's
+a User's authority, a different axis).
+
+**Capacity source**:
+Whose Anthropic credentials fund a **Deployment**'s agent turns — `friday`
+(drawn against Friday's own org keys and billed through the **Control plane**)
+or `byo` (the **Organization**'s own API key, held in its Deployment's vault).
+A per-Deployment setting, not a per-**User** one. Distinct from the plan, which
+decides price and **Usage cap** but not whose key is used.
+_Avoid_: billing mode (that's the Control-plane view), API key (the credential,
+not the choice), tier, plan.
+
+**Usage cap**:
+A hard per-**Deployment** ceiling on agent token spend, enforced **before** a
+turn is dispatched. Applies under either **Capacity source** — under `friday`
+it protects the margin, under `byo` it protects the customer from their own
+autonomous agents, which is the same feature either way. Set by the **Control
+plane** (which owns plans and billing), enforced in the daemon's dispatch path
+against a running counter, and refused loudly rather than queued. Not the same
+as the `usage` / `usage_request` tables, which record spend _after_ a turn and
+are an audit trail, never a brake.
+_Avoid_: quota (acceptable synonym), limit (too generic), budget (acceptable
+informally), rate limit (that's requests per unit time, a different control).
+
 ### Theming
 
 **Mode**:
@@ -214,10 +318,12 @@ _Avoid_: message (reserve for chat/mail), note, idea (too vague), inbox item
 (that's only one possible outcome of a Capture).
 
 **Source**:
-Where a **Capture** originated — `watch | quick_add | …`. Distinct from the
-`blocks.source` provenance enum (`user_chat`, `mail`, …). Source is **pure
-provenance** — recorded for audit and to stamp the resulting `blocks.source`,
-but it does **not** alter clean / classify / gate behavior. Typed and
+Where a **Capture** originated — `watch | quick_add | …`. The one-shot,
+no-reply end of the **Transport** spectrum; a Transport that expects an answer
+is not a Source. Distinct from the `blocks.source` provenance enum
+(`user_chat`, `mail`, …). Source is **pure provenance** — recorded for audit
+and to stamp the resulting `blocks.source`, but it does **not** alter clean /
+classify / gate behavior. Typed and
 transcribed text are treated identically (a transcription can be _more_
 faithful than a typo-laden typed line), so there is no per-source policy.
 
@@ -405,6 +511,31 @@ loopback to the daemon, which owns the classifier (ADR-002 — Claude SDK stays
 daemon-side).
 _Avoid_: token (overloaded — daemon-secret, Zero JWT), password, session.
 
+### Transports
+
+**Transport**:
+A bidirectional, identity-bearing, threaded interface between a human and
+Friday — Slack, email, SMS, the web UI, Linear, JIRA. Carries which **User**
+spoke, which external thread they spoke in, and how Friday should sound back
+(**Transport style**). The **Source**-into-**Intake** path is the degenerate
+case: a Transport that expects no reply.
+_Avoid_: channel (that's the outbound-only **Channel** of the Notification
+system — a Transport may _use_ one), integration (too broad — the Linear API
+client is an integration, not a Transport), adapter, source (that's one-shot
+provenance).
+
+**Transport style**:
+The per-**Transport** register Friday speaks in — brevity, level of detail,
+cadence, formatting. Declared by each Transport rather than inferred, because
+the right answer differs sharply by medium: an SMS reply is one sentence, an
+email reply is structured, a Slack thread reply is terse and link-heavy. A
+_modulation_ of the assistant persona, never a replacement for it — the SOUL is
+the same Friday in every Transport; only the register changes.
+_Avoid_: persona (taken twice — the **Intake persona** and the SOUL assistant
+persona; a Transport style replaces neither), profile (taken by the per-agent
+sandbox profiles), tone (too narrow — style covers length and cadence too),
+voice.
+
 ### Notifications
 
 **Notification**:
@@ -495,6 +626,14 @@ domain concept. Matches the convention macOS and GitHub use; keeps the
 domain vocabulary (Mode/Palette/Theme/Kind) out of the user-facing UI.
 
 ## Flagged ambiguities
+
+- "Conversation" was briefly ambiguous between transport-spanning and
+  transport-scoped — resolved: a **Conversation** is keyed by **User** and agent
+  and spans every **Transport**. A **Transport** is _per-turn_ context: it
+  decides the **Transport style** of the reply and where the reply is delivered,
+  never the identity of the Conversation. An external thread (Slack `thread_ts`,
+  an email `Message-ID` chain) resolves to a Conversation plus a reply target;
+  it is not a Conversation of its own.
 
 - "Theme" historically meant "the Friday light/dark pair." It now means
   the user's whole theming selection. Old uses in commits / docs that
