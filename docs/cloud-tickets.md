@@ -6,7 +6,8 @@ The same tickets are loaded into Friday's own `tickets` table so Friday can work
 them functionally, but that copy is operational — it lives in one Postgres
 database, while this one is in git. If the two ever disagree, this wins.
 
-Ids are pre-assigned `FRI-2001`–`FRI-2051`. The counter was seeded past the
+Ids run from `FRI-2001`. The first 51 were the initial plan; later ids are work
+uncovered while executing it, filed under the epic they belong to. The counter was seeded past the
 external tracker's range (~200 `FRI-nnn` identifiers are already referenced
 throughout these docs) so locally-created ids cannot collide; see the
 short-UUID entry in [decisions.md](decisions.md) § Watch list for the durable
@@ -265,6 +266,53 @@ continuously instead of built blind at the end.
 **Gated on verified row counts against the pre-cutover database, not on the
 stack booting.** Booting proves nothing here: empty tables boot fine. Take a
 `friday backup` immediately before and confirm the bundle restores.
+
+---
+
+### FRI-2053 — Log to stdout in a container, not only to files
+
+`task` · parent FRI-2001 · ADR-050, ADR-051
+
+Discovered running the FRI-2002 image: `docker logs` is **empty**. The
+supervisor writes only to `$FRIDAY_DATA_DIR/logs/supervisor.jsonl`, and the
+daemon, dashboard and zero-cache each write their own files alongside it.
+
+Container platforms collect stdout/stderr. File-only logging means no log
+aggregation for any **Deployment**, which is the concrete form of the "no
+observability" risk ADR-051 names — and ADR-051 also needs per-Deployment
+migration telemetry and synthetic health probes, none of which can reach us
+through a file inside a container.
+
+Two aggravating details: the log files sit on the Deployment's volume and grow
+unbounded, and `backup.ts`'s `FULL_EXCLUDE` deliberately drops `logs/` — so
+they are neither collected nor backed up.
+
+Fix: emit JSONL on stdout (the format is already right for collectors) when
+running in a container, either by switching destination on an env flag or by
+dual-writing. Covers all four processes, not just the supervisor.
+
+### FRI-2054 — Prune the container image (currently 1149 MB)
+
+`task` · parent FRI-2001 · ADR-050, ADR-051
+
+The FRI-2002 image is **1149 MB**. The builder stage runs a full
+(non-prod) `pnpm install` so turbo can build, and the runtime stage then
+`COPY --from=builder /app /app` wholesale — so dev dependencies, TypeScript
+sources and build caches all ship.
+
+Options, roughly in order of payoff: a prod-only dependency tree in the runtime
+stage (`pnpm prune --prod`, or a separate prod install); drop sources,
+`tsconfig`s and test files; copy only each package's `dist`/`build` plus the
+prod `node_modules`.
+
+Constraint to respect: the supervisor's `findRepoRoot()` walks up looking for
+`pnpm-workspace.yaml`, so whatever the runtime layout becomes must still contain
+that file at the tree root.
+
+Worth folding in while here: the ~23 MB embedding model (quantized ONNX,
+all-MiniLM-L6-v2) is fetched at setup/update into `$FRIDAY_DATA_DIR/models/`.
+Baking it into the image instead means Deployments do not each download it, and
+semantic recall works on first boot rather than degrading fail-open to FTS.
 
 ---
 
