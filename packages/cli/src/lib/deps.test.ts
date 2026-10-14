@@ -29,6 +29,7 @@ const { resolveBrew } = await import("./brew-deps.js");
 function healthyOpts() {
   return {
     brewHas: () => true,
+    brewPresent: () => true,
     pgHealth: async () => ({
       reachable: true,
       roleExists: true,
@@ -148,3 +149,86 @@ describe("resolveBrew — launchd-safe absolute brew path", () => {
 });
 
 process.on("exit", () => rmSync(DATA, { recursive: true, force: true }));
+
+describe("checkDeps — off-Homebrew (container) behaviour, FRI-2003", () => {
+  it("does not gate boot on brew:pgvector when Homebrew is absent", async () => {
+    // The whole bug: in a container `brew list` can only fail, so an ungated
+    // check parks the stack permanently. The direct extension check covers it.
+    const r = await checkDeps({ ...healthyOpts(), brewPresent: () => false, brewHas: () => false });
+    expect(r.ok).toBe(true);
+    expect(r.hard).toEqual([]);
+  });
+
+  it("still gates boot on brew:pgvector when Homebrew IS present", async () => {
+    const r = await checkDeps({ ...healthyOpts(), brewPresent: () => true, brewHas: () => false });
+    expect(r.hard.map((i) => i.name)).toContain("brew:pgvector");
+  });
+
+  it("never consults brew at all when Homebrew is absent", async () => {
+    let consulted = false;
+    await checkDeps({
+      ...healthyOpts(),
+      brewPresent: () => false,
+      brewHas: () => {
+        consulted = true;
+        return false;
+      },
+    });
+    expect(consulted).toBe(false);
+  });
+
+  it("reports the missing extension directly rather than via the brew proxy", async () => {
+    const r = await checkDeps({
+      ...healthyOpts(),
+      brewPresent: () => false,
+      brewHas: () => false,
+      vectorExtension: async () => false,
+    });
+    const names = r.hard.map((i) => i.name);
+    expect(names).toContain("pgvector:extension");
+    expect(names).not.toContain("brew:pgvector");
+  });
+
+  it("does not tell a container to run `brew services`", async () => {
+    const r = await checkDeps({
+      ...healthyOpts(),
+      brewPresent: () => false,
+      pgHealth: async () => ({
+        reachable: false,
+        roleExists: false,
+        databaseExists: false,
+        walLevelLogical: false,
+        walLevelActual: null,
+      }),
+    });
+    const pg = r.hard.find((i) => i.name === "postgres");
+    expect(pg?.remedy).not.toContain("brew services");
+    expect(pg?.remedy).toContain("DATABASE_URL");
+  });
+
+  it("does not tell a container to run `friday provision` for the extension", async () => {
+    const r = await checkDeps({
+      ...healthyOpts(),
+      brewPresent: () => false,
+      vectorExtension: async () => false,
+    });
+    const ext = r.hard.find((i) => i.name === "pgvector:extension");
+    expect(ext?.remedy).not.toContain("friday provision");
+    expect(ext?.remedy).toContain("superuser");
+  });
+
+  it("keeps the Homebrew remedies on a Homebrew box", async () => {
+    const r = await checkDeps({
+      ...healthyOpts(),
+      brewPresent: () => true,
+      pgHealth: async () => ({
+        reachable: false,
+        roleExists: false,
+        databaseExists: false,
+        walLevelLogical: false,
+        walLevelActual: null,
+      }),
+    });
+    expect(r.hard.find((i) => i.name === "postgres")?.remedy).toContain("brew services");
+  });
+});
