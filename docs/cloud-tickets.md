@@ -1,0 +1,696 @@
+# Cloud Tickets
+
+The canonical, verbose plan: every ticket in the initial cloud/SaaS plan, with
+the constraint each one has to respect. **This file is the record of truth.**
+The same tickets are loaded into Friday's own `tickets` table so Friday can work
+them functionally, but that copy is operational — it lives in one Postgres
+database, while this one is in git. If the two ever disagree, this wins.
+
+Ids are pre-assigned `FRI-2001`–`FRI-2051`. The counter was seeded past the
+external tracker's range (~200 `FRI-nnn` identifiers are already referenced
+throughout these docs) so locally-created ids cannot collide; see the
+short-UUID entry in [decisions.md](decisions.md) § Watch list for the durable
+fix.
+
+**Where this sits.** [decisions.md](decisions.md) (ADR-050 — ADR-054) owns _why_
+and what was rejected. [cloud-plan.md](cloud-plan.md) owns the _epics, their
+order, and what runs in parallel_ — read that first for the shape. This file
+owns _the work_, one entry per ticket. Vocabulary is in
+[CONTEXT.md](../CONTEXT.md).
+
+**Working channel.** Claude Code remains the primary channel for now. The
+expectation is to switch to the `friday` CLI (and Friday itself) during or
+shortly after E1 — which is the point of the dogfood gate: once the daily driver
+runs the cloud image, these tickets are being worked by the system they
+describe.
+
+Parents are named per ticket rather than written as `ticket_relations` rows —
+there is no service or CLI helper that writes that table (see the watch list).
+
+---
+
+## FRI-2001 — E1: Dev–cloud parity: the container
+
+`epic` · ADR-050, ADR-051 · 13 tasks
+
+Goal: the stack runs as one container (supervisor as PID 1) against external
+Postgres, from the same image the cloud will use.
+
+Done when the daily driver runs that image rather than a `launchctl`-managed
+local install, with row counts verified against the pre-cutover database.
+
+**The only hard gate in the project.** `checkDeps()` reports a hard failure
+forever on a box without Homebrew and the supervisor _parks_ the stack, so
+there is no Linux target to verify anything against until this lands.
+Order within the epic: get it booting early, even imperfectly, then harden —
+doing all thirteen tasks before the first boot attempt front-loads every
+unknown at once.
+
+### FRI-2002 — Linux container build for the Friday stack
+
+`task` · parent FRI-2001 · ADR-050
+
+`pack.mjs`'s `platformTag()` refuses any non-darwin arch and there is no Linux
+leg anywhere in CI. Native addons are per-arch with no cross-compile
+(`better-sqlite3`, `@rocicorp/zero-sqlite3`, `sharp`, `@oxfmt/binding`), so the
+image must be built on the target arch. Retires the darwin tarball as the
+_product_ artifact — it survives only as the enterprise/self-hosted install
+path.
+
+### FRI-2003 — Replace Homebrew preflight with a container-appropriate `checkDeps`
+
+`task` · parent FRI-2001 · ADR-050
+
+`resolveBrew()` probes `/opt/homebrew/bin/brew`, then `/usr/local/bin/brew`,
+then a bare `brew` that does not exist on Linux — so `brewListHas('pgvector')`
+fails permanently and the supervisor **parks the stack rather than failing
+loudly**. Verify pgvector and `wal_level=logical` by SQL against the database
+instead of by `brew list`, and make the failure message actionable for someone
+who has never used Homebrew.
+
+### FRI-2004 — Make the Postgres connection fully configuration
+
+`task` · parent FRI-2001 · ADR-051
+
+`FRIDAY_DB` and the default
+`postgresql://${process.env.USER ?? "postgres"}@localhost:5432/…` are hardcoded
+in roughly five places in `pg-provision.ts`, and `adminConnectionUrl()` assumes
+the OS user is superuser (true under Homebrew, false everywhere else). Host,
+port, database, user and password all become configuration, and **nothing may
+assume a stable host** — that assumption is precisely what would make the later
+shared→dedicated server move expensive.
+
+### FRI-2005 — Move `CREATE EXTENSION vector` off the boot path
+
+`task` · parent FRI-2001 · ADR-051, ADR-044
+
+`ensureVectorExtension()` needs SUPERUSER, and on a shared cluster one
+superuser credential covers every Deployment's database — so a Deployment
+holding it could read every Organization's data. Provisioning creates the
+extension; `checkDeps` only _verifies_ it is present and fails with an
+actionable error; the Deployment's own role stays non-superuser and scoped to
+its database. Same hazard class ADR-044 describes from the other direction.
+
+### FRI-2006 — Supervisor as PID 1
+
+`task` · parent FRI-2001 · ADR-050
+
+launchd `KeepAlive` semantics become the container restart policy. Needs
+signal handling as init (reaping, SIGTERM propagation to the three children),
+and a review of `pgrepDirectChildren()`/`killDescendantTree()` which shell out
+to `pgrep -P`. `friday start`/`stop`/`restart`/`status` lose their `launchctl`
+backing and need a container-appropriate meaning or a deprecation.
+
+### FRI-2007 — Persistent volumes: data dir and `~/.claude/projects`
+
+`task` · parent FRI-2001 · ADR-050
+
+The SDK session transcripts live at
+`~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` — **outside**
+`FRIDAY_DATA_DIR`, under the real OS `$HOME` — which is why `backup --full`
+captures them explicitly. Without them the SDK silently starts a fresh session,
+so every **Conversation** loses its continuity on each deploy. They need a real
+volume. `~/.friday/zero` may be ephemeral: it re-COPYs from Postgres, and
+`FULL_EXCLUDE` already treats it as regenerable.
+
+### FRI-2008 — Drop the `$SHELL -ilc` environment capture
+
+`task` · parent FRI-2001 · ADR-050, ADR-054
+
+`captureShellEnv` spawns the user's interactive login shell to learn PATH and
+toolchain locations, assuming a human has configured `~/.zshrc` on the box. A
+container has no such shell. Replace with an explicitly constructed environment
+for workers and for stdio MCP servers (`resolveStdioCommand` rewrites bare
+`node`/`npx` to the pinned Node's sibling). This is also a prerequisite for
+scrubbing the worker env, since `shellEnv` is one of the two sources that
+leaks.
+
+### FRI-2009 — Verify `.daemon-secret`'s `0600` check against the real mount
+
+`task` · parent FRI-2001 · ADR-050
+
+`getDaemonSecret()` reads `~/.friday/.daemon-secret` and **fatally exits if
+any group or other permission bit is set**. Container volume and secret mounts
+do not reliably preserve file modes, so this either keeps working or
+crash-loops every Deployment at boot, with no degraded path and a confusing
+error. Verify against the actual mount implementation before first deploy; if
+the mode cannot be guaranteed, the check becomes "present and well-formed" with
+the confidentiality guarantee coming from the mount rather than from `stat`.
+
+### FRI-2010 — Inject the age identity at runtime
+
+`task` · parent FRI-2001 · ADR-051, ADR-054
+
+Otherwise `~/.friday/.age-key` sits on the same persistent volume as the
+`vault.enc` it decrypts — obfuscation, not encryption at rest, and the first
+thing a security questionnaire catches. The identity comes from the platform
+secret manager into memory or tmpfs. The source must be **pluggable**, not bound
+to one cloud's API, so a self-hosted Deployment can supply its own (their Vault,
+their KMS, or a mounted file). The five auto-generated platform secrets move
+there too instead of being written into `.env.local` on first boot.
+
+### FRI-2011 — Local reverse proxy and hostname for BetterAuth parity
+
+`task` · parent FRI-2001 · ADR-050, ADR-051
+
+BetterAuth resolves `baseURL`/`trustedOrigins` from the configured public URL
+and **hard-exits via `process.exit(1)`** when they disagree, so dev has to
+exercise a real hostname or the cloud path is untested. Retires `cloudflared`
+from the dev path — it is installed via `cloudflared service install` into
+`~/Library/LaunchAgents` and driven by `launchctl`, neither of which exists on
+the supported target.
+
+### FRI-2012 — Scrub the worker environment
+
+`task` · parent FRI-2001 · ADR-054
+
+Pulled forward from the isolation epic because it is cheap and it closes a
+credential-exposure path that exists **today**, not a future one. Worker env is
+built as `{...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", CI: "1"}` and
+the SDK additionally receives `{...process.env, ...shellEnv}` — so the daemon's
+`DATABASE_URL` and daemon secret are in the environment of every worker, and any
+postinstall script in any customer lockfile can read them with
+`console.log(process.env)`. Replace with an explicitly constructed env. ADR-054
+control 1; a launch gate.
+
+### FRI-2013 — Data migration path to external Postgres
+
+`task` · parent FRI-2001 · ADR-050, ADR-051
+
+The cutover is a database migration, and the failure mode is silent: point a
+container at a fresh external Postgres and **migrations run on boot and create
+empty tables, which looks perfectly healthy.** You would discover it by noticing
+the tickets and chat history were gone.
+
+Note the asymmetry in what is at risk. Memory entries are canonical as
+`memory/entries/*.md` with the database as a searchable mirror, so memory
+survives a database loss. `tickets`, `blocks`, `mail`, `habits`, `schedules` and
+`inbox_items` exist **only** in Postgres — one copy.
+
+Covers: the one-time move (`pg_dump` → restore → verify row counts), the
+shared→dedicated server move ADR-051 defers, and the `wal_level`/pgvector/
+replication-slot prerequisites on the destination. `friday backup` already runs
+`pg_dump` into `postgres.dump` as step 1 of every bundle (sha256 in the manifest
+as `postgresDumpSha256`), and `friday restore` deliberately leaves the tunnel
+dark to avoid split-brain — so there is precedent for restore being a staged,
+careful operation rather than an automatic one.
+
+### FRI-2014 — Cut the daily driver over to the container image
+
+`task` · parent FRI-2001 · ADR-050
+
+The dogfood gate. Makes ADR-050's one-image invariant self-enforcing rather
+than aspirational, and turns this install into the first self-hosted Deployment
+— so the standalone-mode seams the enterprise tier needs get exercised
+continuously instead of built blind at the end.
+
+**Gated on verified row counts against the pre-cutover database, not on the
+stack booting.** Booting proves nothing here: empty tables boot fine. Take a
+`friday backup` immediately before and confirm the bundle restores.
+
+---
+
+## FRI-2015 — E2: Multi-user in one Deployment
+
+`epic` · ADR-051, ADR-052, ADR-053 · 13 tasks
+
+Goal: several Users share one Friday — identity, **Role**, **Scope**, and
+per-User **Conversation**s.
+
+Done when a second account can be added, holds its own Conversation, and cannot
+read the first's personal-Scope rows.
+
+Depends on E1. **Does not depend on E5** — the standalone auth mode is what
+ships today, so multi-user lands without a Control plane.
+
+### FRI-2016 — Thread the acting User through the turn
+
+`task` · parent FRI-2015 · ADR-052, ADR-053
+
+**Do this first; it is the only cross-epic chokepoint.**
+`buildSystemPrompt` and `buildDispatchPrompt` take only an agent row and a
+`DispatchIntent` — no user id reaches prompt assembly at all, even though
+`blocks.user_id` is sitting on the originating row. The MCP loopback handlers
+already carry `x-friday-caller-name`/`x-friday-caller-type`, so an acting-User
+header is the natural extension of a pattern already in place.
+
+One change serving three obligations: ADR-052's prompt identity (so Friday can
+address whoever is speaking), ADR-053's role gate, and the audit/erasure stamp.
+Unblocks E2 and E3 together.
+
+### FRI-2017 — Organization entity; setup creates the org and the first User
+
+`task` · parent FRI-2015 · ADR-051
+
+One row holding what is true of the company rather than of a person: name, SSO
+domain allowlist, the org-owned SOUL. The BetterAuth organization plugin is the
+intended vehicle — it brings memberships and roles with migrations, the same
+bargain already accepted for `apikey` under ADR-015. **No `org_id` on any domain
+table**: one Deployment is one Organization by construction.
+
+### FRI-2018 — Allow Users beyond the first
+
+`task` · parent FRI-2015 · ADR-051
+
+There is no code path that adds a second human. `emailAndPassword` is
+configured `disableSignUp: true` ("Public sign-up is permanently disabled"),
+`resolveSoleUserId()` deliberately returns the earliest-created `user` row, and
+`friday setup` offers only "keep" or "DELETE the user account" when one exists.
+Invites are the bootstrap; SSO through the Control plane becomes the model once
+E5 exists, at which point `disableSignUp: true` stays true and becomes
+_correct_ — a Deployment never signs anyone up, it accepts assertions.
+
+### FRI-2019 — `Role` (`admin | member`) at the MCP tool gate
+
+`task` · parent FRI-2015 · ADR-053
+
+Tools are filtered at registration by _calling agent type_ only —
+`friday-agents`, `friday-schedule`, `friday-evolve`, `friday-apps` and
+`friday-inbox` are orchestrator-only, `friday-secrets` is open to every type but
+`scheduled`. With per-User Conversations that means every employee can install
+Apps, manage agents, spawn builders against company repos, and fetch stored
+credentials. Extend the gate to **agent type × Role**, carrying the acting-User
+header. Role is orthogonal to agent type, not a replacement.
+
+### FRI-2020 — `Conversation` entity
+
+`task` · parent FRI-2015 · ADR-052
+
+Keyed by (**User**, agent) and spanning every **Transport** — one continuous
+thread that Slack, email and the web dashboard are doorways into, with one SDK
+session per pair. `blocks` gains a conversation dimension.
+
+Deliberately **not** per-User agents: `agents.name` is the primary key that
+`mail.from_agent`/`to_agent`, `blocks.agent_name` and `read_cursors` all
+reference by bare string, so there can only ever be one `orchestrator`. This is
+a schema change to the most-written table.
+
+### FRI-2021 — Re-key `read_cursors` to include the User
+
+`task` · parent FRI-2015 · ADR-052
+
+Currently keyed `(device_id, agent_name)` — per device, not per human — and
+the dashboard reads it with a deliberately global Zero query whose comment says
+"Friday is single-user." Unread state has to become per-User, not per-browser.
+
+### FRI-2022 — Split the `settings` singleton
+
+`task` · parent FRI-2015 · ADR-053
+
+`settings` has its primary key pinned to the literal `'singleton'` by a CHECK
+constraint, yet it holds **Theme**, `notify_policy`, the DND window and model
+picks — all personal-**Scope** under ADR-053. Needs an install-global half and a
+per-User half. (`web_push_vapid`'s singleton is correct — one push identity per
+Deployment — leave it alone.)
+
+### FRI-2023 — Per-User predicates on Zero reads
+
+`task` · parent FRI-2015 · ADR-053
+
+Every Zero-synced table carries `{ row: { select: ANYONE_CAN } }` under a
+comment reading "Friday is single-user … every authenticated client reads every
+row. Phase 4 layers in cell-level or row-conditional rules if the auth model
+grows." This is Phase 4. Without it, one employee's browser **replicates
+another's private conversation blocks** — the rows reach the client, so it is not
+a rendering problem. The Zero JWT already carries `userId` in its claims, so this
+is writing predicates, not plumbing identity. Also fix the dashboard's global
+`#bindReadCursors` and `#bindClientDevices` queries.
+
+### FRI-2024 — Ownership checks in mutators
+
+`task` · parent FRI-2015 · ADR-053
+
+Zero has **no insert/update/delete row rules at all** — writes are authorized
+exclusively by server-side mutator functions (Zero 1.5+ deprecates row-level
+write permissions in favour of mutator-defined authz), and none of them check
+ownership today. Every mutator touching a personal-Scope table needs a "may this
+User write this row" check.
+
+### FRI-2025 — Stamp the acting User on org-Scope tables
+
+`task` · parent FRI-2015 · ADR-051, ADR-053
+
+`memory_entries.created_by`, `ticket_comments.author` and `mail` attribute to
+_agent_ names (`"friday"`, `"kitchen"`); `blocks.user_id` exists but is
+attribution-only. Record the acting human even while these tables stay
+org-visible — authorship not captured **cannot be backfilled**.
+
+Prerequisite for two obligations, not hygiene: the audit question "who asked
+Friday for our credentials" (`secrets_fetch_log` records only the agent), and
+erasure — you cannot delete what you cannot attribute.
+
+### FRI-2026 — One org SOUL with dynamic addressing
+
+`task` · parent FRI-2015 · ADR-052
+
+`~/.friday/SOUL.md` is a single file whose `{{YOUR_NAME}}` was substituted once
+from `process.env.USER` at first boot and never re-derived, and the prompt
+instructs the agent to "Hold the form — don't drift between '<name>', 'Sir', and
+no-address mid-conversation." So a ten-person company gets an assistant that
+calls everyone by the installing user's shell username. The Address rule becomes
+"address the User who is speaking, by their name," and the file stops being
+documented as "your editable identity" — it is shared character, so it becomes
+admin-owned.
+
+### FRI-2027 — Narrow the evolve pipeline to what a Deployment can act on
+
+`task` · parent FRI-2015 · ADR-053
+
+`evolve_proposals` carries five types — memory, docs, code, prompts, tooling —
+and **four of them propose changes to the product, not the customer's data**.
+Code ships as an immutable image, so patching it in place breaks the one-image
+invariant and every fleet update. `CONSTITUTION.md` and `agents/<type>.md` are
+code-owned, read from the bundled package directory and never copied into
+`~/.friday/`. docs and tooling are the repo. Only **memory** is unambiguously
+the customer's own.
+
+Evolve works beautifully for an audience of one who is also the maintainer, and
+mostly does not translate. Ship: memory hygiene, consolidation, the Dream Diary,
+and org-level prompt tuning through the admin-owned `SOUL.md`. Remove the
+code/docs/tooling paths from the product surface, and consider dropping
+`evolve_proposals` from `SYNC_TABLES` if the surface shrinks enough (it is the
+table that caused the `SchemaVersionNotSupported` reload-loop once already).
+
+Two consequences: applying a proposal becomes **admin**-only under the Role
+split, and `evolve_critical`'s DND bypass needs rethinking — "Friday wants to
+change itself" is a reasonable 3am interrupt for a maintainer and an odd one for
+an employee.
+
+### FRI-2028 — Revocation, and an admin-initiated per-User erasure action
+
+`task` · parent FRI-2015 · ADR-053
+
+Departure is **revoke, not erase** — sessions (`revoke`/`revoke-all` exist),
+devices (`client_devices.revoked_at`), and **Capture key**s (the BetterAuth
+apiKey plugin has revocation built in), with data preserved so the
+Organization's record stays whole. The Organization is the data controller, so an
+individual's erasure request goes to their employer.
+
+**But the capability must exist**: an admin needs an explicit per-User erasure
+action to honour a controller instruction when it arrives. Depends on the
+acting-User stamp.
+
+---
+
+## FRI-2029 — E3: Transports
+
+`epic` · ADR-052 · 6 tasks
+
+Goal: **Transport** as a first-class concept with per-Transport **Transport
+style**; Slack first.
+
+Done when a Slack thread drives a turn and Friday replies into that thread, as
+the right **User**, in Slack's register.
+
+Depends on E1 and on threading the acting User through the turn. **Does not
+depend on E5**: for dogfooding, point one Slack app straight at the Deployment —
+the central verify-and-route shim is an E5 refactor, which is what keeps this
+epic off the Control plane's critical path.
+
+Coarse by design — refine when reached.
+
+### FRI-2030 — Transport registry and Transport style
+
+`task` · parent FRI-2029 · ADR-052
+
+Each Transport declares its own register — brevity, level of detail, cadence,
+formatting — because the right answer differs sharply by medium. Follow ADR-047's
+routing-target registry pattern (declarative natural-language `guidance`
+contributed per entry and merged into the prompt), **not** a parallel prompt stack
+like the Intake persona. A Transport style modulates the assistant persona; it
+never replaces the SOUL.
+
+### FRI-2031 — Webhook receiver with per-provider signature verification
+
+`task` · parent FRI-2029 · ADR-052
+
+**No webhook receiver exists anywhere in the repo** — a grep for webhook
+handlers returns zero hits, and Linear today is outbound-only (`reconcile()`
+polls the API, `importIssue()` pulls on demand). Only `/api/capture` is reachable
+without a session, gated by its own `x-api-key` check. Each provider has its own
+signature scheme.
+
+### FRI-2032 — `user_identities` mapping
+
+`task` · parent FRI-2029 · ADR-052, ADR-051
+
+`(provider, external_id) → User`, where `provider` covers `slack`, `email`,
+`linear`, `jira` — not only login providers. The BetterAuth `accounts` table
+exists for OAuth links but has no provider configured.
+
+**A Transport identity match is identification, not authorization.** Resolving a
+Slack ID to a User says who is speaking; whether that User may drive an agent is
+a separate check. Keeping these distinct is what prevents Slack workspace
+membership from becoming sufficient to run an agent.
+
+### FRI-2033 — External thread to Conversation and reply target
+
+`task` · parent FRI-2029 · ADR-052
+
+A Slack `thread_ts` or an email `Message-ID` chain resolves to a Conversation
+plus where the reply goes. A small mapping table, **not** a conversation
+dimension — a User starting two Slack threads feeds one Conversation but replies
+route to two different targets. The Transport is per-turn context: it decides the
+reply's style and destination, never the Conversation's identity.
+
+### FRI-2034 — Slack Transport end-to-end
+
+`task` · parent FRI-2029 · ADR-052
+
+The dogfood target and the first real Transport. Rides the seam that already
+exists: `sendUserMessage` writes a `blocks` row at `status='pending'`, a trigger
+fires `NOTIFY friday_new_pending_block`, and the daemon's LISTEN handler
+dispatches the turn — so anything that can write that row can start a turn. This
+is not a second pipeline.
+
+### FRI-2035 — Web dashboard as a Transport
+
+`task` · parent FRI-2029 · ADR-052
+
+Unify so the durable-thread case is not a special case: the web UI becomes a
+Transport whose external thread happens to be long-lived. Keeps the rule uniform
+— every turn arrives on a Transport — and avoids a branch in reply routing.
+
+---
+
+## FRI-2036 — E4: Agent isolation
+
+`epic` · ADR-054 · 7 tasks
+
+Goal: agent execution moves into containers; the container is the sandbox.
+
+Done when builders run in per-task containers with egress deny-by-default and
+ADR-054's remaining controls are in place.
+
+Depends on E1, where control 1 (the scrubbed environment) already landed.
+
+**The exposure this epic closes, stated plainly:** the orchestrator runs
+unsandboxed with `permissionMode: "bypassPermissions"` as the daemon's OS user,
+and once E3 lands it is driven by any User over any Transport. E3 before E4 is a
+deliberate, time-boxed exposure, not an oversight.
+
+Coarse by design — refine when reached.
+
+### FRI-2037 — Worker boundary as a protocol seam
+
+`task` · parent FRI-2036 · ADR-054
+
+`wakeAgent`/`wakeAgentCritical` are IPC calls, `peekLiveWorker` inspects an
+in-process handle, and `killDescendantTree` walks `pgrep -P`. All three become a
+network protocol and a container lifecycle. Build the seam from the start rather
+than retrofitting it — the per-worker env, the stdio-only MCP transport, and the
+`~/.claude/projects` transcript path all have to be handled per-worker anyway,
+and doing that twice is the expensive version.
+
+### FRI-2038 — Per-task builder containers
+
+`task` · parent FRI-2036 · ADR-054
+
+Per **task**, not per turn: a Builder's worktree must survive turns
+(uncommitted changes, `node_modules`, an in-progress branch). State the guarantee
+honestly as **bounded to one assignment** — `.git/hooks/*` and `node_modules` are
+executable surfaces that survive a reattached volume, so per-turn ephemerality
+would be largely illusory. Upside: teardown becomes "stop the container" instead
+of the `setsid`-escape tree walk listed as residual risk #2, and resource limits
+become cgroups instead of Darwin-honoured `ulimit`s.
+
+### FRI-2039 — Egress deny-by-default
+
+`task` · parent FRI-2036 · ADR-054
+
+Allowlist the git host and package registries, nothing else — this removes the
+payoff from most supply-chain compromises: a malicious postinstall can run, but
+cannot exfiltrate or phone home. **Verify the allowlist is destination-based and
+denies link-local**, because the cloud metadata endpoint (`169.254.169.254`) is an
+_account_-level compromise rather than a Deployment-level one: steal the host's
+IAM credentials and the blast radius is the whole cloud account. Launch gate.
+
+### FRI-2040 — Per-Organization network isolation
+
+`task` · parent FRI-2036 · ADR-054
+
+Deny builder→any Postgres (a builder talks to the daemon over the worker
+protocol and has no business reaching a database), cross-Organization
+reachability, and builder→Control plane/webhook shim. Under the shared-cluster
+arrangement this denial is the **only** barrier between a compromised build and
+every other Organization's database, since isolation there is credential-only at
+the network layer.
+
+### FRI-2041 — Repo allowlist and per-task single-repo tokens
+
+`task` · parent FRI-2036 · ADR-054
+
+Two layers: the GitHub App installation is the outer boundary (the customer
+chooses which repositories), and an admin-configured list is the inner one —
+because an admin installing with "All repositories" must not mean any **member**
+can have Friday push anywhere. Today `workspace.ts` takes a `baseRepo` that is a
+local path or a remote URL with **no authorization notion at all**;
+`assertInsideWorkspacesRoot()` is filesystem containment, not repo authorization.
+
+Mint tokens **per task, scoped to a single repository**, with `contents: write`
+plus `pull_requests: write` only — so Friday opens branches and PRs and never
+pushes to a default branch, and a compromise reaches one repo rather than every
+repo the customer owns. This matters more than restricting tooling, since `gh` is
+in the Brewfile and available to agents. Launch gate (the per-task tokens).
+
+### FRI-2042 — `.git/hooks` on the M1 deny-list
+
+`task` · parent FRI-2036 · ADR-054
+
+A compromised postinstall can drop a `post-checkout` hook that re-executes on
+the next turn in an otherwise "fresh" container, because the hook survives on the
+reattached worktree volume. This is the specific mechanism that makes per-turn
+container ephemerality illusory, so the regex layer should deny it explicitly.
+
+### FRI-2043 — Retire M2/M5 and rewrite `docs/sandbox.md`
+
+`task` · parent FRI-2036 · ADR-054
+
+`sandbox-exec` is macOS-only and **fails open** on Linux:
+`sandboxExecAvailable()` treats a missing `/usr/bin/sandbox-exec` as "disabled",
+so builders silently run with no kernel isolation and no error. M2's deny-list
+targets macOS surfaces with no Linux analog (`~/Library/Keychains`, `launchctl`,
+`osascript`, `tccutil`), and M5's `ulimit -t`/`-n` were chosen for _Darwin_
+semantics. Containment becomes cgroups plus container lifetime; the doc needs
+rewriting around that rather than patching.
+
+---
+
+## FRI-2044 — E5: Control plane
+
+`epic` · ADR-051, ADR-052, ADR-053 · 7 tasks
+
+Goal: the second application — marketing, registration, billing, legal,
+support, provisioning, fleet upgrade, the central webhook shim, **Usage cap**
+ceilings and the kill switch.
+
+Done when a company can sign up and get a working Deployment unattended.
+
+Depends on E1 only (there must be an image to provision). **Blocks nothing above
+it** — separate codebase, no consumers until customer #2, so it is the natural
+second-person workstream and can start whenever there are hands for it.
+
+Its hard parts are operational rather than architectural.
+
+Coarse by design — refine when reached.
+
+### FRI-2045 — Unattended Deployment provisioning
+
+`task` · parent FRI-2044 · ADR-051
+
+On signup: create the database, provision the role and the `vector` extension,
+create `friday_pub`, allocate a replication slot, generate the five
+per-Deployment secrets, allocate a hostname and certificate, boot the stack.
+Today this work is `friday setup` — an interactive clack wizard. Nothing in the
+repo does any of it unattended.
+
+Capacity constraint to track from week one: `max_replication_slots` defaults to
+**10** and zero-cache needs one slot per Deployment, so the 11th Deployment on a
+shared cluster cannot start. Raising it is a server config change requiring a
+restart.
+
+### FRI-2046 — Control plane as identity provider
+
+`task` · parent FRI-2044 · ADR-051
+
+One login; the Control plane authenticates and hands the Deployment a signed
+assertion, which the Deployment exchanges for a **local** BetterAuth session.
+Because the session is minted locally and BetterAuth runs 7-day sessions on a
+1-day sliding refresh, a Control-plane outage blocks **new** logins only, not
+active ones. Keep the auth source a pluggable seam so a self-hosted Deployment
+can run standalone against the customer's own SSO.
+
+### FRI-2047 — Central webhook shim
+
+`task` · parent FRI-2044 · ADR-052
+
+A **separate, minimal service** from the rest of the Control plane — stateless
+verify-and-route, no billing database — because unlike login it is a _runtime_
+dependency for every Transport. Required because a distributed Slack app has
+exactly **one** Event Subscriptions URL for all installations (likewise one
+webhook URL per GitHub App, one redirect URI per OAuth app), so per-Deployment
+webhook URLs are not available. Routes by
+`(provider, external_workspace_id) → Deployment`. Keep the webhook source
+pluggable so self-hosted customers can use their own apps.
+
+### FRI-2048 — Capacity source and Usage cap enforcement
+
+`task` · parent FRI-2044 · ADR-051
+
+`Capacity source` is `friday` (our org keys, billed through the Control plane)
+or `byo` (the customer's own key in their vault — the `ANTHROPIC_API_KEY` vault
+plumbing partly exists). A **Usage cap** applies in **both** modes: under
+`friday` it protects the margin, under `byo` it protects the customer from their
+own autonomous agents.
+
+**Enforcement must sit in the dispatch path**, against a running counter, and
+refuse loudly rather than queue. The scheduler is a 30-second tick with nobody
+watching, `usage`/`usage_request` are written _after_ a turn, and the
+`worker.turn.stalled` watchdog detects liveness not spend — so a looping agent
+can burn a month's budget in an hour unnoticed. **Can land before the rest of
+E5.**
+
+### FRI-2049 — Fleet upgrade orchestration
+
+`task` · parent FRI-2044 · ADR-051
+
+Each release is N independent boot-time migrations against N databases. Needs
+canary cohorts, per-Deployment migration telemetry, and **synthetic per-tenant
+health probes** — process liveness is insufficient, because the worst failure (a
+table in the Zero schema but not in `friday_pub`) leaves the page and tunnel
+looking fine while live sync is dead and the dashboard reload-loops every ~2s.
+
+Accepted consequences to design around: expand/contract migration discipline
+becomes a permanent contract (version skew is never atomic), schema rollback does
+not exist (roll forward only), the Drizzle `when`-timestamp hazard escalates from
+bricking one laptop to splitting the fleet silently, and ADR-044's
+self-referential update gap means a fix to the rollout mechanism cannot apply to
+the rollout that delivers it.
+
+### FRI-2050 — Suspension, retention window, export and delete
+
+`task` · parent FRI-2044 · ADR-053
+
+A cancelling Organization enters a retention window implemented as Deployment
+_suspension_ — the same state the kill switch needs for non-payment, abuse and a
+blown Usage cap. Three in-window actions: **restore**, **export**, **delete
+now**. Export-then-delete is the expected path, so export is asynchronous and a
+delete following one must wait for it to complete and be confirmed retrieved.
+
+Deletion must reach four things outside Postgres or it deletes an index rather
+than the data: the data-dir volume (`memory/entries/*.md`, `uploads/`), the SDK
+transcripts under `~/.claude/projects/`, the Zero replica and replication slot,
+and the Deployment's secret-manager entries. Note `attachments` is
+content-addressed by `sha256` with no owner column, so per-User attachment
+deletion is ambiguous by construction.
+
+### FRI-2051 — Registration, billing, legal and support surfaces
+
+`task` · parent FRI-2044 · ADR-051
+
+The public application a prospective customer meets before they have a
+Deployment. Trials need a **token ceiling, not just an expiry** — the exposure is
+two separate costs, and only one of them is capped by a date. Measured idle
+infrastructure cost at decision time was ~700 MB RSS across ~29 processes per
+Deployment doing nothing, with zero-cache about 57% of it, and scale-to-zero is
+largely unavailable because always-on is the product.

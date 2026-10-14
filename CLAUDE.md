@@ -13,6 +13,8 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 - `docs/decisions.md` — ADRs + watch list.
 - Schema reference: `packages/shared/src/db/schema.ts` (Drizzle source of truth; migrations under `packages/shared/drizzle/`). Includes the FRI-24 `memory_entries.embedding vector(384)` pgvector column for semantic recall — server-side-only, NOT replicated to Zero (like `content_tsv`; ADR-025). The pgvector extension is created via an admin connection in `ensureVectorExtension()` (pg-provision.ts), NOT inside a migration — `CREATE EXTENSION vector` needs superuser and the `friday` role lacks it. The embedding runtime is onnxruntime-web (WASM) — its `.wasm` files ship in the release tarball's `node_modules`, so there's NO per-platform native binary to fetch and it runs cross-platform (Intel x64 + Apple Silicon). Only the embedding model + tokenizer cache on disk under `<FRIDAY_DATA_DIR>/models/` (quantized ONNX, all-MiniLM-L6-v2), fetched at `friday update`/setup and degrading fail-open to FTS-only if absent. No embedding secret exists — nothing is added to `.env` or the age vault (net `.env` reduction, by construction).
 - `docs/roadmap.md` — Open work, sequenced for execution.
+- `docs/cloud-plan.md` — Cloud/SaaS project plan: the epics, their order, and what can run in parallel. Owns _sequencing only_ — rationale lives in the ADRs (`docs/decisions.md`), the work and its per-ticket constraints in `docs/cloud-tickets.md`, vocabulary in `CONTEXT.md`. Do not restate a decision here.
+- `docs/cloud-tickets.md` — The canonical verbose cloud/SaaS plan: all 51 tickets (`FRI-2001`–`FRI-2051`) with the constraint each must respect. Mirrored into Friday's `tickets` table for working; **the file is the record of truth** if the two diverge.
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.
 - `docs/self-hosted-runner.md` — Setting up the Intel x64 self-hosted GitHub Actions runner that builds the `darwin-x64` release leg (prereqs, registration, launchd service, PATH/`gh` gotchas, troubleshooting).
@@ -35,6 +37,12 @@ Specifically, before considering a task done, check whether your change touches:
 A docs-only change still warrants a commit with scope `docs`. A code change that lands without its README/docs counterpart is incomplete work, not "fast iteration."
 
 ## Design Principles
+
+- **Agency asymptotic to zero.** Every LLM invocation is the most expensive, least reproducible, and least auditable way to accomplish a task. Prefer spending an agent _once_ to write the code that makes an agent unnecessary _next_ time, over treating an agent as the runtime for recurring work. The agent is a compiler from intent to code, not an interpreter you re-run.
+  - **Scope.** Applies to _specifiable_ work — anything with a correct answer you could write down. Novel judgment over open context is what agents are for; do not try to code-generate that away. The asymptote is over the specifiable fraction, which grows as the system learns its own patterns.
+  - **Trigger: recurrence, not first sight.** Building the tool for a one-off is the speculative abstraction we otherwise forbid. The second or third occurrence of the same shape is the signal.
+  - **In practice.** An MCP tool is this principle in action: deterministic code the agent calls instead of re-reasoning, so each tool lowers agentic load permanently. ADR-047 is one rung down the ladder (orchestrator-in-context → one cheap classifier call); the next rung is deterministic routes for patterns that recur, with the classifier as fallback. The evolve pipeline's sharpest purpose is exactly this — notice that an agent keeps being asked to do X, then emit the tool so X stops needing one. Bulk or mechanical work (loading N rows, reformatting, migrating) should never be agent-driven: one transaction beats N tool calls on cost, speed, atomicity, and repeatability.
+  - **It is also an audit property.** Under ADR-051/ADR-053 a code gate can be tested, logged, and attributed to a **User**; an LLM deciding authority cannot. Determinism buys security, not just cost.
 
 - **Preserve over delete.** Default to keeping data. Patch and update rather than delete.
 - **Workspace containment.** Builders work exclusively in their assigned worktrees.
