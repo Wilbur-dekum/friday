@@ -54,7 +54,6 @@ import {
 import {
   checkDeps,
   clearBlockedState,
-  PROVISION_REMEDY,
   writeBlockedState,
   type DepReport,
 } from "../lib/deps.js";
@@ -517,7 +516,7 @@ async function preflightAndBringUp(opts?: {
   writeBlockedState({ ts: new Date().toISOString(), hard: report.hard });
   logSupervisor("deps.blocked", {
     hard: report.hard.map((i) => i.name),
-    // FRI-2003: log the per-issue remedies, not a blanket PROVISION_REMEDY.
+    // FRI-2003: log the per-issue remedies rather than one blanket remedy.
     // `checkDeps` already tailors each remedy to the environment (a container
     // is told to fix DATABASE_URL, not to run `brew services`), so a hardcoded
     // summary contradicted the detail it was summarising.
