@@ -49,6 +49,10 @@ COPY packages/evolve/package.json packages/evolve/
 COPY packages/integrations/linear/package.json packages/integrations/linear/
 COPY services/daemon/package.json services/daemon/
 COPY services/dashboard/package.json services/dashboard/
+# `pnpm.patchedDependencies` in package.json points at patches/, and pnpm hashes
+# the patch file during resolution — so it must be present for the install, not
+# just for the build.
+COPY patches/ patches/
 
 RUN pnpm install --frozen-lockfile
 
