@@ -12,6 +12,16 @@
 #
 #   docker compose up --build
 #
+# Then create an account to log in with (dev only, and not run on boot on
+# purpose — an image that seeds a known account is a backdoor the moment it
+# leaves a laptop):
+#
+#   docker compose exec -e FRIDAY_DEV_SEED=1 friday \
+#     node packages/cli/scripts/dev-seed.mjs
+#
+# Defaults to dev@friday.test / friday-dev-password; override with
+# FRIDAY_SEED_EMAIL / FRIDAY_SEED_PASSWORD / FRIDAY_SEED_NAME.
+#
 # The app will still refuse to serve until the Deployment role and the `vector`
 # extension exist on the database — see FRI-2005, which moves that provisioning
 # off the boot path for real. Until then `postgres.initdb` below does it once at
