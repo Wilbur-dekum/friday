@@ -1,10 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import {
-  decryptPayload,
-  encryptPayload,
-  identityToRecipient,
-  readAgeIdentityFromDisk,
-} from "./age.js";
+import { decryptPayload, encryptPayload, identityToRecipient, resolveAgeIdentity } from "./age.js";
 import { emptyMeta, readMetaFile, validateBijection, writeMetaFile } from "./meta.js";
 import {
   AGE_KEY_PATH,
@@ -73,7 +68,7 @@ export async function unlockVault(force = false): Promise<UnlockResult> {
     return { ok: true, cache: cached };
   }
 
-  const identity = readAgeIdentityFromDisk();
+  const identity = resolveAgeIdentity();
   if (!identity) {
     secretsLocked = true;
     cached = undefined;
@@ -126,7 +121,7 @@ export async function writeVaultAndMeta(
     );
   }
 
-  const identity = readAgeIdentityFromDisk();
+  const identity = resolveAgeIdentity();
   if (!identity) throw new Error("missing .age-key");
 
   let recipient: string;

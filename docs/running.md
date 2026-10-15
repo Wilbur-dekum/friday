@@ -117,6 +117,20 @@ zero-cache needs a logical replication slot, and a host zero-cache already holds
 
 `packaging/dev-initdb/` stands in for what the Control plane does in the cloud: a **superuser** creates the `friday` role and the `vector` extension _before_ the Deployment starts, and the Deployment's own role never holds the privilege to do either (ADR-044, ADR-051). `FRIDAY_ADMIN_DATABASE_URL` carries that superuser connection; `DATABASE_URL` carries the application one. They are deliberately different — pointing `CREATE EXTENSION` at `DATABASE_URL` fails on permissions rather than working.
 
+### Secrets
+
+Integration secrets live in an age-encrypted vault at `$FRIDAY_DATA_DIR/secrets/vault.enc`. The identity that decrypts it resolves in order:
+
+| source                      | use                                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `FRIDAY_AGE_IDENTITY`       | the identity itself, for anything that can set env (Kubernetes `secretKeyRef`, ECS, Fly)             |
+| `FRIDAY_AGE_IDENTITY_FILE`  | a path, for mounted secrets (Kubernetes secret volumes, Docker secrets at `/run/secrets/...`, tmpfs) |
+| `$FRIDAY_DATA_DIR/.age-key` | the laptop default — unchanged when neither env var is set                                           |
+
+**Do not let a Deployment fall through to the third row.** The key would sit on the same volume as the ciphertext it decrypts, which is obfuscation rather than encryption at rest (ADR-051). Running as PID 1 with the identity read from disk logs a warning saying so.
+
+Nothing is configured in the compose stack because dev has no integration secrets; add one of the two env vars when you need the vault.
+
 ### Volumes
 
 `/data` is `FRIDAY_DATA_DIR`. `/home/friday` is volumed separately because the SDK writes session transcripts to `$HOME/.claude/projects/<cwd>/<id>.jsonl`, **outside** the data dir — without it every Conversation silently starts fresh after a deploy.
