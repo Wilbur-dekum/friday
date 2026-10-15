@@ -140,16 +140,29 @@ export async function provisionPostgres(opts: {
   const log = opts.log ?? (() => {});
   const migrationsDir = opts.migrationsDir ?? defaultMigrationsDir();
 
-  assertPgReady();
+  await assertPgReady(adminConnectionUrl());
   log("  postgres is reachable");
 
   const adminUrl = adminConnectionUrl();
   const password = generateOrReuseFridayPassword();
   const created = await ensureRoleAndDatabase(adminUrl, password, log);
 
+  // FRI-2004: host:port comes from the admin connection we just provisioned
+  // against, not a hardcoded `localhost`. On a Homebrew Mac that resolves to
+  // localhost:5432 exactly as before; for a self-hosted Deployment pointed at
+  // a managed Postgres via FRIDAY_ADMIN_DATABASE_URL, the written DATABASE_URL
+  // now follows it instead of silently naming a database that is not there.
+  const adminHost = (() => {
+    try {
+      const u = new URL(adminUrl);
+      return `${u.hostname}:${u.port || "5432"}`;
+    } catch {
+      return "localhost:5432";
+    }
+  })();
   const databaseUrl = `postgresql://${FRIDAY_ROLE}:${encodeURIComponent(
     password,
-  )}@localhost:5432/${FRIDAY_DB}`;
+  )}@${adminHost}/${FRIDAY_DB}`;
   upsertEnvVar("DATABASE_URL", databaseUrl);
   log(`  DATABASE_URL → ~/.friday/.env`);
 
@@ -255,23 +268,98 @@ export function findPgIsReady(): string {
   return findPgBin("pg_isready");
 }
 
-function assertPgReady(): void {
-  const bin = findPgIsReady();
-  const result = spawnSync(bin, { encoding: "utf8" });
-  if (result.status !== 0) {
-    throw new Error(
-      `Postgres is not reachable. Run \`brew services start postgresql@18\` and re-run setup.\n` +
-        `  pg_isready exit=${result.status} stdout=${result.stdout?.trim()} stderr=${result.stderr?.trim()}`,
-    );
+/**
+ * FRI-2004: reachability is a CONNECTION, not a local binary.
+ *
+ * This used to `spawnSync(pg_isready)` with no arguments, which fails twice
+ * over off a Homebrew Mac: the binary is not installed in a container at all,
+ * and with no arguments it probes `localhost:5432` — so it ignored
+ * DATABASE_URL and answered a question nobody asked. Connecting with the
+ * resolved URL instead needs no client package and actually tests the
+ * configured target: host, port, credentials and database in one go.
+ *
+ * Takes the URL explicitly because the two callers mean different things by
+ * "reachable": provisioning needs the ADMIN connection it is about to create
+ * the role and database with, while the boot-path health probe needs the
+ * APPLICATION connection the daemon will really use.
+ */
+async function assertPgReady(connectionString: string): Promise<void> {
+  const client = new Client({ connectionString, connectionTimeoutMillis: 5_000 });
+  try {
+    await client.connect();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const remedy = process.env.FRIDAY_ADMIN_DATABASE_URL
+      ? "check the configured host, port and credentials"
+      : "run `brew services start postgresql@18` and re-run setup";
+    throw new Error(`Postgres is not reachable — ${remedy}.\n  ${detail}`, { cause: err });
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * The legacy Homebrew-local shape: connect as the current OS user, who is the
+ * superuser by default under `brew install postgresql@18`. Retained as the
+ * fallback so a macOS install keeps working with no configuration, but it is
+ * only ever correct on that one topology — see the two resolvers below.
+ */
+function localHomebrewUrl(database: string): string {
+  const user = process.env.USER ?? "postgres";
+  return `postgresql://${user}@localhost:5432/${database}`;
+}
+
+/**
+ * FRI-2004: the Friday application database, as CONFIGURATION.
+ *
+ * Previously three call sites each inlined
+ * `postgresql://${process.env.USER}@localhost:5432/friday` as their fallback,
+ * which is wrong anywhere that is not a Homebrew Mac — in a container
+ * `localhost` is the container itself, and `$USER` is `node`. ADR-050 puts
+ * Postgres outside the container entirely, so the connection has to be a
+ * setting, not a constant, and nothing may assume a stable host (which is also
+ * what keeps ADR-051's later shared→dedicated server move cheap).
+ *
+ * Same precedence `getDbAndPool()` uses: explicit env first (the test
+ * convention), then the resolved config, then the legacy local default.
+ */
+function resolveFridayDbUrl(): string {
+  return process.env.DATABASE_URL ?? loadFridayConfig().databaseUrl ?? localHomebrewUrl(FRIDAY_DB);
+}
+
+/**
+ * A SUPERUSER connection, for the operations the `friday` role deliberately
+ * cannot perform: CREATE ROLE / CREATE DATABASE, and `CREATE EXTENSION vector`
+ * (ADR-044). Distinct from `resolveFridayDbUrl()` on purpose — pointing these
+ * at DATABASE_URL would fail with a permissions error rather than work.
+ *
+ * `FRIDAY_ADMIN_DATABASE_URL` supplies it where the OS user is not a superuser
+ * (any container, any managed Postgres). The target database is swapped in
+ * because the same credentials are used against both `postgres` (to create the
+ * role and database) and the Friday database itself (to create the extension).
+ *
+ * FRI-2005 removes the boot-path use of this entirely: on a shared cluster one
+ * superuser credential reaches every Deployment's database, so a Deployment
+ * must never hold one. Until then it is at least configurable rather than
+ * assumed.
+ */
+function resolveAdminUrl(database: string): string {
+  const configured = process.env.FRIDAY_ADMIN_DATABASE_URL;
+  if (!configured) return localHomebrewUrl(database);
+  try {
+    const u = new URL(configured);
+    u.pathname = `/${database}`;
+    return u.toString();
+  } catch {
+    // Not parseable as a URL — hand it back untouched rather than silently
+    // substituting a local default the operator did not ask for. The caller's
+    // connect() will fail with the real reason.
+    return configured;
   }
 }
 
 function adminConnectionUrl(): string {
-  // Connect as the current OS user to the default 'postgres' database to
-  // perform role/database creation. On macOS Homebrew Postgres, the
-  // current OS user is the superuser by default.
-  const user = process.env.USER ?? "postgres";
-  return `postgresql://${user}@localhost:5432/postgres`;
+  return resolveAdminUrl("postgres");
 }
 
 function generateOrReuseFridayPassword(): string {
@@ -480,9 +568,9 @@ export async function ensureVectorExtension(
   log: (msg: string) => void = () => {},
   connectionString?: string,
 ): Promise<boolean> {
-  const adminInFriday =
-    connectionString ??
-    `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
+  // SUPERUSER: `CREATE EXTENSION vector` is exactly what the `friday` role
+  // cannot do, so this resolves the admin URL rather than DATABASE_URL.
+  const adminInFriday = connectionString ?? resolveAdminUrl(FRIDAY_DB);
   const client = new Client({ connectionString: adminInFriday });
   await client.connect();
   try {
@@ -518,10 +606,10 @@ export async function ensureVectorExtension(
  * `connectionString` overrides the target (tests point it at a scratch DB).
  */
 export async function hasVectorExtension(connectionString?: string): Promise<boolean> {
-  const adminInFriday =
-    connectionString ??
-    `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
-  const client = new Client({ connectionString: adminInFriday });
+  // Read-only (`SELECT 1 FROM pg_extension`), so the application role suffices
+  // and this must work on the boot path where no superuser is available.
+  const target = connectionString ?? resolveFridayDbUrl();
+  const client = new Client({ connectionString: target });
   try {
     await client.connect();
   } catch {
@@ -580,11 +668,12 @@ export async function reconcileSyncPublication(
   log: (msg: string) => void = () => {},
   opts: { connectionString?: string; tables?: readonly string[] } = {},
 ): Promise<PublicationReconcileResult> {
-  const adminInFriday =
-    opts.connectionString ??
-    `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
+  // Runs on every daemon boot (ADR-045) and alters a publication the Friday
+  // role owns, so it uses the application connection — a boot path cannot
+  // depend on a superuser credential being present.
+  const target = opts.connectionString ?? resolveFridayDbUrl();
   const desired = opts.tables ?? SYNC_TABLES;
-  const client = new Client({ connectionString: adminInFriday });
+  const client = new Client({ connectionString: target });
   await client.connect();
   try {
     // Find which of the desired tables actually exist in the DB right now.
@@ -734,7 +823,7 @@ export async function probePostgresHealth(opts?: { migrationsDir?: string }): Pr
   };
 
   try {
-    assertPgReady();
+    await assertPgReady(resolveFridayDbUrl());
     result.reachable = true;
   } catch (err) {
     result.reachableReason = err instanceof Error ? err.message : String(err);
