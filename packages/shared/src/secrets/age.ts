@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import * as age from "age-encryption";
+import { isContainer } from "../container.js";
 import { AGE_KEY_PATH } from "./paths.js";
 
 export async function generateAgeKeypair(): Promise<{ identity: string; recipient: string }> {
@@ -72,7 +73,10 @@ export function resolveAgeIdentity(): string | undefined {
   if (!picked) return undefined;
   // Flag the configuration ADR-051 calls out, once per process: in a container
   // (PID 1) the key sitting beside its own ciphertext defeats the vault.
-  if (picked.source === "disk" && process.pid === 1 && !warnedAboutDiskIdentity) {
+  // FRI-2008: `process.pid === 1` was wrong — only the supervisor is PID 1,
+  // and the vault is read by the daemon and the secrets CLI too, where the
+  // warning would never have fired. isContainer() propagates via env.
+  if (picked.source === "disk" && isContainer() && !warnedAboutDiskIdentity) {
     warnedAboutDiskIdentity = true;
     console.warn(
       `WARN: age identity read from ${AGE_KEY_PATH}, which is on the same volume as the vault it decrypts — that is obfuscation, not encryption at rest. Inject it at runtime instead via FRIDAY_AGE_IDENTITY or FRIDAY_AGE_IDENTITY_FILE (ADR-051, FRI-2010).`,
