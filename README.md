@@ -359,6 +359,18 @@ pnpm dev:dashboard    # vite dev on the dashboard — binds :5173
 
 The `--dev` CLI flag was retired (FRI-83) — `friday start --dev` now exits with citty's unknown-flag error.
 
+### Container dev stack
+
+Runs the stack the way the cloud will — one container (supervisor + daemon + zero-cache + dashboard) against a sibling Postgres:
+
+```bash
+docker compose up --build
+docker compose exec -e FRIDAY_DEV_SEED=1 friday \
+  node packages/cli/scripts/dev-seed.mjs
+```
+
+Then <http://localhost:7615> — `dev@friday.test` / `friday-dev-password`. Agents don't run: the `claude` CLI is deliberately absent from the image. Caveats and configuration: [docs/running.md](docs/running.md#container-dev-stack).
+
 ### Testing
 
 ```bash

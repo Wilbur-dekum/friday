@@ -24,6 +24,8 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 
 Treat `README.md` as part of the documentation surface, not an afterthought. When work changes anything a newcomer would learn from the README — features, CLI commands, prerequisites, setup steps, project layout, `~/.friday/` contents, topology, supported integrations — update the README in the same change that updates `docs/`. Do not wait for "a docs pass later."
 
+**Brevity is the first principle in the quick paths.** The README's "Quick start" and "Developing" sections are read by someone trying to get running in the next five minutes. Give them the shortest command sequence that actually works, the one thing they need to know afterwards, and a link. Everything else — why it works that way, caveats, a second configuration, what is deliberately missing — belongs in `docs/`: `running.md` for operating it, `architecture.md` for how it is built, `decisions.md` for why. A quick start that accumulates caveats has stopped being one. When you catch yourself adding a third paragraph to the README, that paragraph wanted to be in `docs/` with a link pointing at it.
+
 Specifically, before considering a task done, check whether your change touches:
 
 - **A user-visible feature** described in the README's "Key features" section → update the matching bullet.
@@ -32,6 +34,7 @@ Specifically, before considering a task done, check whether your change touches:
 - **Project structure** (new package, moved service, renamed directory) → update the "Project structure" tree _and_ the structure block at the top of this CLAUDE.md.
 - **`~/.friday/` layout** (new file, renamed directory) → update the `~/.friday/` block in the README _and_ `docs/running.md`.
 - **Topology / wire protocol** (new public process, new auth boundary) → update the topology diagram _and_ `docs/architecture.md`.
+- **A local development workflow** (a new compose file or dev script, changed ports, a different way to run or seed the stack) → update the README's "Developing" section _and_ `docs/running.md`. Contributor-facing setup is documentation too; it goes stale the same way and strands the same people.
 - **Docs themselves** (new doc page, renamed, removed) → update the README's "Documentation" table _and_ the list above in this CLAUDE.md.
 
 A docs-only change still warrants a commit with scope `docs`. A code change that lands without its README/docs counterpart is incomplete work, not "fast iteration."

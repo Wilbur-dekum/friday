@@ -1,0 +1,93 @@
+# Local container stack — FRI-2004, ADR-050.
+#
+# Brings up a Friday Deployment the way the cloud will: the app as ONE
+# container (supervisor PID 1 over daemon + zero-cache + dashboard) against an
+# EXTERNAL Postgres. Postgres is a sibling service here rather than a process
+# inside the app container, which is the same boundary ADR-050 draws — it just
+# happens to live next door in dev.
+#
+# Deliberately NOT pointed at the host's `friday` database: zero-cache needs a
+# logical replication slot, and a host zero-cache already holds one against the
+# same publication. Two of them would fight over it.
+#
+#   docker compose up --build
+#
+# Then create an account to log in with (dev only, and not run on boot on
+# purpose — an image that seeds a known account is a backdoor the moment it
+# leaves a laptop):
+#
+#   docker compose exec -e FRIDAY_DEV_SEED=1 friday \
+#     node packages/cli/scripts/dev-seed.mjs
+#
+# Defaults to dev@friday.test / friday-dev-password; override with
+# FRIDAY_SEED_EMAIL / FRIDAY_SEED_PASSWORD / FRIDAY_SEED_NAME.
+#
+# The app will still refuse to serve until the Deployment role and the `vector`
+# extension exist on the database — see FRI-2005, which moves that provisioning
+# off the boot path for real. Until then `postgres.initdb` below does it once at
+# first start, which is the same split the cloud will have (provisioning creates
+# the extension with a superuser; the Deployment only verifies it).
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: friday
+    # wal_level=logical is a SERVER-level setting and zero-cache's logical
+    # replication is dead without it (ADR-024). max_replication_slots is raised
+    # off its default of 10 because each Deployment's zero-cache consumes one —
+    # the ceiling ADR-051 flags for the shared-cluster arrangement.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=20
+      - -c
+      - max_wal_senders=20
+    ports:
+      - "5433:5432" # 5433 on the host so it cannot collide with a local Postgres
+    volumes:
+      # pg18 wants a single mount at /var/lib/postgresql (data then lives in a
+      # subdirectory), so that `pg_upgrade --link` has no mount-point boundary
+      # to cross. Mounting .../data directly makes the image refuse to start.
+      - pgdata:/var/lib/postgresql
+      - ./packaging/dev-initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d friday"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  friday:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # FRI-2004: the connection is configuration. `postgres` is the compose
+      # service name — inside the container `localhost` is the container
+      # itself, which is exactly the assumption this ticket removes.
+      DATABASE_URL: postgresql://friday:friday@postgres:5432/friday
+      # zero-cache replicates from the same database (ADR-024 keeps these in
+      # sync; provisioning normally writes both).
+      ZERO_UPSTREAM_DB: postgresql://friday:friday@postgres:5432/friday
+      # Superuser connection for the operations the `friday` role cannot do.
+      # In the cloud this belongs to provisioning and never to a Deployment
+      # (one superuser reaches every database on a shared cluster) — FRI-2005.
+      FRIDAY_ADMIN_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      FRIDAY_DATA_DIR: /data
+    ports:
+      - "7615:7615"
+    volumes:
+      - friday-data:/data
+      # SDK session transcripts live outside FRIDAY_DATA_DIR; without a volume
+      # every Conversation silently starts fresh on each deploy (FRI-2007).
+      - friday-home:/home/friday
+
+volumes:
+  pgdata:
+  friday-data:
+  friday-home:

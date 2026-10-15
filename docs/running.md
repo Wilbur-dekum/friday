@@ -89,6 +89,44 @@ For full DB-level isolation (separate Postgres database and a parallel zero-cach
 
 The `--dev` CLI flag was retired with FRI-83. `friday start --dev` now exits with citty's unknown-flag error.
 
+## Container dev stack
+
+Brings up a Deployment the way ADR-050 shapes the cloud one: the app as **one container** (supervisor as PID 1 over daemon + zero-cache + dashboard) against an **external** Postgres. Same image the cloud will run, which is what keeps the one-image invariant honest rather than aspirational.
+
+```bash
+docker compose up --build
+docker compose exec -e FRIDAY_DEV_SEED=1 friday \
+  node packages/cli/scripts/dev-seed.mjs
+```
+
+|           |                                                                    |
+| --------- | ------------------------------------------------------------------ |
+| Dashboard | <http://localhost:7615>                                            |
+| Postgres  | `localhost:5433` (5433 so it cannot collide with a local Postgres) |
+| Account   | `dev@friday.test` / `friday-dev-password`                          |
+
+Override the account with `FRIDAY_SEED_EMAIL` / `FRIDAY_SEED_PASSWORD` / `FRIDAY_SEED_NAME`. The seed is idempotent — a second run reports the existing account and exits 0.
+
+**The seed is not run on boot, on purpose.** It requires `FRIDAY_DEV_SEED=1` every time. An image that seeds a known account at startup is a backdoor the moment it leaves a laptop.
+
+### Why not the host's `friday` database
+
+zero-cache needs a logical replication slot, and a host zero-cache already holds one against the same publication — two would fight over it. The compose stack therefore runs its own Postgres with its own volume. `max_replication_slots` is raised to 20 because each Deployment's zero-cache consumes one and the server default is 10 (the ceiling ADR-051 flags for the shared-cluster arrangement).
+
+### The provisioning split
+
+`packaging/dev-initdb/` stands in for what the Control plane does in the cloud: a **superuser** creates the `friday` role and the `vector` extension _before_ the Deployment starts, and the Deployment's own role never holds the privilege to do either (ADR-044, ADR-051). `FRIDAY_ADMIN_DATABASE_URL` carries that superuser connection; `DATABASE_URL` carries the application one. They are deliberately different — pointing `CREATE EXTENSION` at `DATABASE_URL` fails on permissions rather than working.
+
+### Volumes
+
+`/data` is `FRIDAY_DATA_DIR`. `/home/friday` is volumed separately because the SDK writes session transcripts to `$HOME/.claude/projects/<cwd>/<id>.jsonl`, **outside** the data dir — without it every Conversation silently starts fresh after a deploy.
+
+To start completely clean: `docker compose down -v` (drops the Postgres data, the data dir, and the transcripts).
+
+### What doesn't work yet
+
+Agents can't run — the `claude` CLI is absent from the image by design, because agent auth is the Capacity source decision in ADR-051, not a packaging one. You can log in, browse, and exercise the sync path, but a turn will fail.
+
 ## Data location
 
 Everything lives at `~/.friday/`:
