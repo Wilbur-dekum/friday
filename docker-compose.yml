@@ -61,6 +61,25 @@ services:
       timeout: 3s
       retries: 20
 
+  # FRI-2011: a real hostname in front of the dashboard, so the cloud's
+  # proxy-and-public-origin path is exercised in dev rather than discovered at
+  # cutover. `*.localhost` resolves to 127.0.0.1 in browsers (RFC 6761 is
+  # implemented client-side), so this needs no /etc/hosts entry — but the macOS
+  # system resolver does NOT do it, so curl and scripts need
+  # `--resolve friday.localhost:80:127.0.0.1`.
+  #
+  # BetterAuth derives absolute URLs, the CSRF origin check, and the session
+  # cookie's `Secure`/`__Secure-` prefix from its baseURL — and hard-exits when
+  # a configured public URL is not in trustedOrigins. Running behind a proxy
+  # locally is the only way to find that before a Deployment does.
+  proxy:
+    image: caddy:2-alpine
+    depends_on: [friday]
+    ports:
+      - "80:80"
+    command: >-
+      caddy reverse-proxy --from http://friday.localhost --to friday:7615
+
   friday:
     build: .
     depends_on:
@@ -79,6 +98,11 @@ services:
       # (one superuser reaches every database on a shared cluster) — FRI-2005.
       FRIDAY_ADMIN_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
       FRIDAY_DATA_DIR: /data
+      # FRI-2011: the public origin the browser actually uses. BetterAuth
+      # generates cookies and redirects against this, and asserts it is a
+      # trusted origin — so a mismatch fails loudly here instead of silently
+      # 403-ing every sign-in in a Deployment.
+      BETTER_AUTH_URL: http://friday.localhost
     ports:
       - "7615:7615"
     volumes:
