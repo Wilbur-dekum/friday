@@ -54,6 +54,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
+import { isContainer } from "@friday/shared";
 import { logger } from "./log.js";
 
 export const SHELL_ENV_TIMEOUT_ENV_VAR = "FRIDAY_SHELL_ENV_TIMEOUT_MS";
@@ -80,14 +81,42 @@ export const SECRET_LIKE_KEY_RE =
  * but which we know carry credentials in their value (e.g. Postgres URLs
  * with embedded passwords).
  */
-export const EXPLICIT_SECRET_KEYS = new Set<string>(["DATABASE_URL", "ZERO_UPSTREAM_DB"]);
+export const EXPLICIT_SECRET_KEYS = new Set<string>([
+  "DATABASE_URL",
+  "ZERO_UPSTREAM_DB",
+  // FRI-2012: containerisation moved configuration into the environment, so
+  // keys that only ever lived in files now ride in `process.env`. Measured in
+  // the compose stack: the daemon carries DATABASE_URL *and*
+  // FRIDAY_ADMIN_DATABASE_URL, and the latter is the SUPERUSER connection —
+  // on ADR-051's shared cluster that one credential reaches every
+  // Deployment's database.
+  "FRIDAY_ADMIN_DATABASE_URL",
+  // The age identity decrypts the whole secrets vault; the file variant names
+  // a path a worker could simply read.
+  "FRIDAY_AGE_IDENTITY",
+  "FRIDAY_AGE_IDENTITY_FILE",
+  // Not a credential but a delegated capability: with the agent socket a
+  // worker — or a postinstall script inside one — authenticates as the
+  // operator to any host or repository their keys reach.
+  "SSH_AUTH_SOCK",
+]);
+
+/**
+ * FRI-2012: suffix patterns for families rather than individual names, so a
+ * key added later is caught without anyone remembering to extend the list.
+ * `*_DATABASE_URL` is the one that bit us — the explicit entry above covers
+ * today's name, this covers tomorrow's.
+ */
+export const SECRET_LIKE_SUFFIX_RE = /_(DATABASE_URL|CONNECTION_STRING|DSN|IDENTITY)$/i;
 
 /**
  * B1: predicate the in/out gates use to decide whether a key carries a
  * secret. Exported for tests.
  */
 export function isSecretKey(key: string): boolean {
-  return EXPLICIT_SECRET_KEYS.has(key) || SECRET_LIKE_KEY_RE.test(key);
+  return (
+    EXPLICIT_SECRET_KEYS.has(key) || SECRET_LIKE_KEY_RE.test(key) || SECRET_LIKE_SUFFIX_RE.test(key)
+  );
 }
 
 /**
@@ -184,6 +213,17 @@ export async function captureShellEnv(opts: CaptureOptions = {}): Promise<ShellE
   const timeoutMs = opts.timeoutMs ?? readTimeoutFromEnv() ?? DEFAULT_TIMEOUT_MS;
   const exists = opts.existsImpl ?? existsSync;
   const spawnFn = opts.spawnImpl ?? spawn;
+  // FRI-2008: a container has no human-configured interactive login shell, so
+  // the capture can only spawn a bare shell, pay the startup cost, and return
+  // approximately `process.env` anyway. Worse, it makes the worker's
+  // environment a function of whatever dotfiles happen to exist in the image —
+  // unbounded and machine-dependent, which cannot stand once a worker runs
+  // untrusted customer code. Skip straight to the process snapshot.
+  if (!opts.shellOverride && isContainer()) {
+    cached = fallback({ reason: "containerized", start });
+    return cached;
+  }
+
   const shell = opts.shellOverride ?? resolveShellPath(exists);
 
   if (!shell) {

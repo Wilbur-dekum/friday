@@ -416,6 +416,20 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // daemon (post-loadFridayConfig refactor that's clean of secrets) plus
   // CI / COREPACK_* overrides, then run `$SHELL -ilc` to layer the
   // user's interactive shell env on top of that.
+  // FRI-2012: deliberately the FULL process.env, not the sanitized variant.
+  //
+  // A first attempt sanitized here and broke the e2e sync harness: the worker
+  // is Friday's OWN code and reaches the database (it imports
+  // `@friday/shared/services` for attachments and mail), and both the harness
+  // and the container supply DATABASE_URL through the environment with no
+  // `.env.local` to fall back to. Stripping it left `getDbAndPool()` with
+  // nothing to connect with.
+  //
+  // The boundary that actually matters is one level deeper — the env handed to
+  // the Claude Code child in `worker.ts`, which is what the agent's Bash tool
+  // and anything it spawns inherit. That is where untrusted repository code
+  // runs, and it is not a blanket strip either: the CLI needs its own
+  // Anthropic credentials to function. See FRI-2059.
   const env = {
     ...process.env,
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
