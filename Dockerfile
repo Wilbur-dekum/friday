@@ -66,8 +66,22 @@ FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 # procps — `pgrep -P` / `pgrep -g`; the supervisor and worker teardown shell out
 #          to it, and it is NOT in node:*-slim
 # bash  — lifecycle.ts spawns `/bin/bash -c '<ulimit prelude>; exec "$@"'`
+# postgresql-client-18 comes from PGDG, not Debian: bookworm ships client 15,
+# and pg_dump/pg_restore refuse a server newer than themselves — the compose
+# and cloud servers are pg18. Without these, `friday restore` cannot run inside
+# a Deployment at all, which is what FRI-2013 needs for the cutover and what
+# ADR-051's shared→dedicated move and FRI-2050's export both rely on.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git procps bash ca-certificates \
+  && apt-get install -y --no-install-recommends \
+       git procps bash ca-certificates curl gnupg \
+  && install -d /usr/share/postgresql-common/pgdg \
+  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+       -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+       > /etc/apt/sources.list.d/pgdg.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends postgresql-client-18 \
+  && apt-get purge -y curl gnupg && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production

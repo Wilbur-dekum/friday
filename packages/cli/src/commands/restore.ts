@@ -334,7 +334,21 @@ export const restoreCommand = defineCommand({
       // the cache so loadFridayConfig() reads the BUNDLE's DATABASE_URL.
       clearSecretsCache();
       clearFridayConfigCache();
-      const dbUrl = loadFridayConfig().databaseUrl;
+      // FRI-2013: an explicitly-configured DATABASE_URL outranks the bundle's.
+      //
+      // The bundle carries the SOURCE machine's `.env`, so its DATABASE_URL
+      // names that machine's database — `localhost:5432` for a laptop. Restore
+      // into a Deployment and that is simply wrong: the database is a sibling
+      // service, reached through the environment, and there is no `.env.local`
+      // to correct it afterwards. Taking the bundle's value would point the
+      // Deployment at a database that does not exist, or at the operator's own.
+      //
+      // Same precedence `getDbAndPool()` already uses, so a restore targets the
+      // database the Deployment will actually boot against.
+      const dbUrl = process.env.DATABASE_URL ?? loadFridayConfig().databaseUrl;
+      if (process.env.DATABASE_URL) {
+        console.log(pc.dim(`  using DATABASE_URL from the environment (not the bundle's)`));
+      }
       if (!dbUrl) {
         throw new Error(
           "DATABASE_URL missing from the restored ~/.friday/.env. The bundle carried none — run `friday setup` to provision Postgres, then re-restore.",

@@ -117,6 +117,25 @@ zero-cache needs a logical replication slot, and a host zero-cache already holds
 
 `packaging/dev-initdb/` stands in for what the Control plane does in the cloud: a **superuser** creates the `friday` role and the `vector` extension _before_ the Deployment starts, and the Deployment's own role never holds the privilege to do either (ADR-044, ADR-051). `FRIDAY_ADMIN_DATABASE_URL` carries that superuser connection; `DATABASE_URL` carries the application one. They are deliberately different — pointing `CREATE EXTENSION` at `DATABASE_URL` fails on permissions rather than working.
 
+### Migrating the database into a Deployment
+
+The cutover is a database migration whose failure mode is silent: point a Deployment at a fresh Postgres and boot-time migrations create every table, the stack comes up healthy, and it is empty. You find out by noticing the tickets and chat history are gone.
+
+**Stop the source first.** This is not optional. Measured on the first real migration: the source read 34175 blocks, the restored copy held 34176, and the source was at 34178 twenty seconds later — the daemon was running and writing throughout. A census of a live database can never match, and worse, every write between the dump and the cutover is silently lost.
+
+```bash
+friday stop                                   # source must be quiet
+pg_dump -Fc -d friday -f friday.dump
+pg_restore -h localhost -p 5433 -U postgres -d friday \
+  --clean --if-exists --no-owner --no-privileges friday.dump
+```
+
+Then compare row counts on both sides. `CENSUS_TABLES` in `packages/shared/src/db/row-census.ts` lists the tables whose **only** copy is Postgres — `tickets`, `blocks`, `mail`, `habits`, `schedules`, `inbox_items` and friends. A mismatch there is data loss. `memory_entries` is deliberately excluded: memory is canonical as `memory/entries/*.md` with the database as a searchable mirror, so its count can legitimately differ after a reindex.
+
+A surplus counts as a mismatch too — a restore should reproduce the source exactly, and extra rows mean the target was not empty.
+
+**Restoring a full bundle inside a Deployment** (`friday restore`) works now that the image carries `postgresql-client-18`; bookworm's default client is 15 and refuses a pg18 server. Restore takes `DATABASE_URL` from the environment in preference to the bundle's, because the bundle carries the source machine's `localhost:5432` and a Deployment reaches its database as a sibling service.
+
 ### Lifecycle in a container
 
 The container runs `tini` as PID 1 (`init: true`) with the supervisor beneath it. Node does not reap orphaned grandchildren — measured, four orphans left four `Z` entries parented to PID 1 — and agent workers spawn detached and run build tools that fork, so over a long-lived Deployment the process table fills. Signal handling was already fine (`docker stop` completes in ~0.6s, well inside the grace period); only reaping needed fixing.
