@@ -29,7 +29,7 @@ import {
   identityToRecipient,
   initVault,
   patchFridayGitignore,
-  readAgeIdentityFromDisk,
+  resolveAgeIdentity,
   readMetaFile,
   removeSecret,
   schema,
@@ -379,7 +379,7 @@ export const secretsCommand = defineCommand({
     "public-key": defineCommand({
       meta: { name: "public-key", description: "Print age recipient for recipients.txt" },
       async run() {
-        const identity = readAgeIdentityFromDisk();
+        const identity = resolveAgeIdentity();
         if (!identity) {
           console.error("no .age-key");
           process.exit(1);
