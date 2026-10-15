@@ -79,9 +79,12 @@ ENV FRIDAY_DATA_DIR=/data
 ENV HOME=/home/friday
 
 WORKDIR /app
-COPY --from=builder /app /app
+# --chown on the COPY, not a `RUN chown -R` afterwards: changing ownership
+# rewrites every file, so the RUN form duplicated the whole tree into a second
+# layer (measured 1.86GB COPY + 1.96GB chown). Same result, half the image.
+COPY --from=builder --chown=node:node /app /app
 
-RUN mkdir -p /data "$HOME" && chown -R node:node /data "$HOME" /app
+RUN mkdir -p /data "$HOME" && chown node:node /data "$HOME"
 USER node
 VOLUME ["/data", "/home/friday"]
 
