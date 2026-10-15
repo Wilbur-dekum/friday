@@ -28,6 +28,32 @@ jobs:
     name: Release Please
     runs-on: ubuntu-latest
     steps:
+      # Forks do not inherit secrets, so GHA_CLIENT_ID / GHA_PRIVATE_KEY are
+      # empty on one — and `create-github-app-token` then hard-fails ("the
+      # 'client-id' input must be set to a non-empty string"), reddening every
+      # push to main for a reason that has nothing to do with the commit. A
+      # placeholder value is not an option: the action exchanges these with
+      # GitHub for a real installation token, so a fake one fails auth rather
+      # than bypassing it.
+      #
+      # Gate the job on the credentials existing instead. `secrets` is not
+      # available in a job-level `if`, only step-level, hence the guard step
+      # and the `steps.creds.outputs.present` condition on everything after it.
+      # Skipped steps report success, so main stays green and a repo WITH the
+      # App configured is completely unaffected.
+      - name: Check for App credentials
+        id: creds
+        env:
+          CLIENT_ID: ${{ secrets.GHA_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.GHA_PRIVATE_KEY }}
+        run: |
+          if [ -n "$CLIENT_ID" ] && [ -n "$PRIVATE_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release Please skipped — GHA_CLIENT_ID / GHA_PRIVATE_KEY are not set on this repository. Releases are disabled until a GitHub App (contents + pull-requests write) is installed and those secrets are added."
+          fi
+
       # Mint a short-lived GitHub App installation token so release-please
       # creates/updates its Release PR AS THE APP, not GITHUB_TOKEN. Events
       # (PR open, branch push) made with GITHUB_TOKEN do NOT trigger workflows
@@ -36,12 +62,14 @@ jobs:
       # normally. App (contents + pull-requests write) is installed on this repo.
       - name: Mint GitHub App token
         id: app-token
+        if: ${{ steps.creds.outputs.present == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.GHA_CLIENT_ID }}
           private-key: ${{ secrets.GHA_PRIVATE_KEY }}
 
       - id: release
+        if: ${{ steps.creds.outputs.present == 'true' }}
         # Pinned to a full commit SHA (not the mutable @v4 tag): this workflow
         # gates the release that release-publish.yml then packs into the exact
         # tarball users `curl | bash` / `friday update`, so a retagged or
@@ -59,7 +87,7 @@ jobs:
       # merge it once branch-protection's required checks (Validate) go green;
       # `--squash` keeps the release commit a single Conventional Commit.
       - name: Enable auto-merge on the Release PR
-        if: ${{ steps.release.outputs.prs_created == 'true' || steps.release.outputs.pr != '' }}
+        if: ${{ steps.creds.outputs.present == 'true' && (steps.release.outputs.prs_created == 'true' || steps.release.outputs.pr != '') }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr || '{}').number }}
