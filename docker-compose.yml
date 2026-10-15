@@ -82,6 +82,23 @@ services:
 
   friday:
     build: .
+    # FRI-2006: run an init process (tini) as PID 1 in front of the supervisor.
+    #
+    # Node does not reap orphaned grandchildren. Measured: orphaning four
+    # processes left four `Z` entries parented to PID 1, none collected — and
+    # agent workers spawn detached, run build tools that fork, and are exactly
+    # the thing that orphans. Over a long-lived Deployment that fills the
+    # process table.
+    #
+    # Hand-rolling reaping in the supervisor would mean a SIGCHLD loop around
+    # `waitpid(-1)` that has to not race the child bookkeeping it already does.
+    # tini is the boring, correct version, and `docker run --init` is the same
+    # thing — so the image stays runnable without compose doing anything special.
+    #
+    # Signal propagation is NOT the reason: that already works (a `docker stop`
+    # completes in 0.6s, far inside the grace period), and tini forwards signals
+    # to the supervisor unchanged.
+    init: true
     depends_on:
       postgres:
         condition: service_healthy

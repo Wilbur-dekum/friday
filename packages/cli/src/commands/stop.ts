@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
+import { refuseInContainer } from "../lib/lifecycle-guard.js";
 import * as launchd from "../lib/launchd.js";
 
 /**
@@ -27,6 +28,10 @@ export const stopCommand = defineCommand({
     },
   },
   async run({ args }) {
+    // FRI-2006: no launchctl in a container — refuse rather than no-op.
+    if (refuseInContainer("stop")) {
+      process.exit(1);
+    }
     if (args.service) {
       console.error(pc.red(`single-service operations not supported under launchd supervision.`));
       console.error(`  ${pc.cyan("friday stop")} stops the whole stack atomically.`);
