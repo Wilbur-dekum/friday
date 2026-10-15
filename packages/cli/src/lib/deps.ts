@@ -28,7 +28,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { hasVectorExtension, probePostgresHealth, STATE_DIR } from "@friday/shared";
-import { resolveBrew } from "./brew-deps.js";
+import { brewAvailable, resolveBrew } from "./brew-deps.js";
 
 /** A single dependency finding. `remedy` is the exact thing to run/do. */
 export interface DepIssue {
@@ -65,6 +65,7 @@ function brewListHas(dep: string): boolean {
  */
 export async function checkDeps(opts?: {
   brewHas?: (dep: string) => boolean;
+  brewPresent?: () => boolean;
   pgHealth?: () => Promise<{
     reachable: boolean;
     roleExists: boolean;
@@ -75,6 +76,11 @@ export async function checkDeps(opts?: {
   vectorExtension?: () => Promise<boolean>;
 }): Promise<DepReport> {
   const brewHasFn = opts?.brewHas ?? brewListHas;
+  const brewPresentFn = opts?.brewPresent ?? (() => brewAvailable());
+  // Homebrew-managed local install vs. container. Everything brew-shaped below
+  // — the pgvector gate and the `brew services` remedies — only applies to the
+  // former; see each site.
+  const onBrew = brewPresentFn();
   const pgHealthFn = opts?.pgHealth ?? (() => probePostgresHealth());
   const vectorFn = opts?.vectorExtension ?? (() => hasVectorExtension());
 
@@ -90,7 +96,18 @@ export async function checkDeps(opts?: {
   // implied by the Postgres probe below, fnm is a prerequisite for the
   // supervisor to even run, and pnpm/gh/cloudflared are builder/tunnel-only
   // (`friday doctor` still reports all of them).
-  if (!brewHasFn("pgvector")) {
+  //
+  // FRI-2003: this check is a *proxy* for "is the pgvector extension
+  // available", and it is only meaningful where Homebrew manages Postgres. In a
+  // container `brew list` can never succeed (`resolveBrew()` falls through to a
+  // bare `brew` that does not exist), so an ungated check reports a permanent
+  // hard failure and the supervisor PARKS the stack — silently, which is worse
+  // than crash-looping. Skip it off-Homebrew: the DIRECT check below
+  // (`pgvector:extension` via `hasVectorExtension()`) covers the same ground
+  // against the live database, and a direct check beats a proxy anyway. The
+  // only thing lost is the earlier, cheaper signal on a box whose Postgres is
+  // unreachable — and that box already reports the `postgres` miss.
+  if (onBrew && !brewHasFn("pgvector")) {
     hard.push({ name: "brew:pgvector", present: false, remedy: PROVISION_REMEDY });
   }
 
@@ -104,7 +121,9 @@ export async function checkDeps(opts?: {
     hard.push({
       name: "postgres",
       present: false,
-      remedy: "start Postgres: `brew services start postgresql@18`",
+      remedy: onBrew
+        ? "start Postgres: `brew services start postgresql@18`"
+        : "make Postgres reachable at DATABASE_URL (check host, port, and credentials) — this Deployment uses an external Postgres",
     });
   } else {
     if (!pg.roleExists || !pg.databaseExists) {
@@ -131,7 +150,13 @@ export async function checkDeps(opts?: {
       hard.push({
         name: "pgvector:extension",
         present: false,
-        remedy: PROVISION_REMEDY,
+        // Off-Homebrew, `friday provision` is the wrong instruction: the
+        // extension needs a SUPERUSER connection the Deployment's own role
+        // deliberately lacks, so it is created by provisioning before the
+        // container starts (ADR-051, FRI-2005) — not by the box itself.
+        remedy: onBrew
+          ? PROVISION_REMEDY
+          : "create the `vector` extension on the Friday database using a superuser connection (provisioning does this; the Deployment role cannot)",
       });
     }
   }

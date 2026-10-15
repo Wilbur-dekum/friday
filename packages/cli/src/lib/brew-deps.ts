@@ -42,6 +42,19 @@ export function resolveBrew(exists: (p: string) => boolean = existsSync): string
   return "brew";
 }
 
+/**
+ * Whether Homebrew exists on this box at all.
+ *
+ * Reuses `resolveBrew`'s prefix list so there is one definition of "where brew
+ * lives": an absolute hit means Homebrew is installed, the bare-`brew` fallback
+ * means it is not. The boot preflight needs this to tell a Homebrew-managed
+ * local install apart from a container, where `brew list` can only ever fail
+ * and gating boot on it would park the stack forever (FRI-2003).
+ */
+export function brewAvailable(exists: (p: string) => boolean = existsSync): boolean {
+  return resolveBrew(exists) !== "brew";
+}
+
 /** Whether `brew list <dep>` reports the dep installed. */
 export function brewHas(dep: string): boolean {
   const r = spawnSync(resolveBrew(), ["list", dep], { stdio: "ignore" });

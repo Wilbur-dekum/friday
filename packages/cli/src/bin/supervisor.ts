@@ -51,13 +51,7 @@ import {
   zeroCacheCli,
   zeroCacheCwd,
 } from "../lib/zero-cache.js";
-import {
-  checkDeps,
-  clearBlockedState,
-  PROVISION_REMEDY,
-  writeBlockedState,
-  type DepReport,
-} from "../lib/deps.js";
+import { checkDeps, clearBlockedState, writeBlockedState, type DepReport } from "../lib/deps.js";
 
 // ---- Layout -----------------------------------------------------------
 
@@ -517,7 +511,11 @@ async function preflightAndBringUp(opts?: {
   writeBlockedState({ ts: new Date().toISOString(), hard: report.hard });
   logSupervisor("deps.blocked", {
     hard: report.hard.map((i) => i.name),
-    remedy: PROVISION_REMEDY,
+    // FRI-2003: log the per-issue remedies rather than one blanket remedy.
+    // `checkDeps` already tailors each remedy to the environment (a container
+    // is told to fix DATABASE_URL, not to run `brew services`), so a hardcoded
+    // summary contradicted the detail it was summarising.
+    remedies: report.hard.map((i) => `${i.name}: ${i.remedy}`),
   });
   if (depsRecheckTimer) return;
   depsRecheckTimer = setInterval(() => {
