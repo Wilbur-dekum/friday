@@ -34,6 +34,7 @@
  */
 
 import { ChildProcess, spawn, spawnSync, type StdioOptions } from "node:child_process";
+import { resolveMirrorToStdout } from "../lib/log-mirror.js";
 import { appendFileSync, createWriteStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -145,7 +146,11 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         // child's stdout-mode, every log line lands twice. Dev mode
         // (`pnpm dev:daemon`) bypasses the supervisor and keeps the
         // default `stdoutMode: "json"` for terminal visibility.
-        FRIDAY_LOG_STDOUT: "off",
+        // FRI-2053: inverted in a container — see MIRROR_TO_STDOUT. There the
+        // child keeps stdout ON and the supervisor forwards it to its own
+        // stdout; the file copy is the one createLogger writes. Exactly one
+        // copy per sink either way, so FRI-116 stays fixed.
+        ...(MIRROR_TO_STDOUT ? {} : { FRIDAY_LOG_STDOUT: "off" }),
       },
     },
     {
@@ -183,7 +188,11 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         // doubles. Dev mode (`pnpm dev:dashboard`) bypasses the
         // supervisor and keeps the default stdout mode for terminal
         // visibility.
-        FRIDAY_LOG_STDOUT: "off",
+        // FRI-2053: inverted in a container — see MIRROR_TO_STDOUT. There the
+        // child keeps stdout ON and the supervisor forwards it to its own
+        // stdout; the file copy is the one createLogger writes. Exactly one
+        // copy per sink either way, so FRI-116 stays fixed.
+        ...(MIRROR_TO_STDOUT ? {} : { FRIDAY_LOG_STDOUT: "off" }),
       },
     },
   ];
@@ -215,6 +224,20 @@ function supervisorLogPath(): string {
   return join(LOGS_DIR, "supervisor.jsonl");
 }
 
+/**
+ * FRI-2053: mirror logs to stdout as well as to files.
+ *
+ * Everything funnels to `~/.friday/logs/<service>.jsonl` — the supervisor
+ * appends its own events there, and each child writes its own file. That is
+ * right under launchd, whose plist already routes supervisor stdout to its own
+ * StandardOutPath, and wrong in a container, where `docker logs` is the only
+ * thing anyone can collect and came back empty.
+ *
+ * Decision logic lives in `resolveMirrorToStdout` so it is testable without
+ * starting a supervisor; see that function for why PID 1 is the default signal.
+ */
+const MIRROR_TO_STDOUT: boolean = resolveMirrorToStdout(process.env.FRIDAY_LOG_STDOUT);
+
 function logSupervisor(event: string, extra: Record<string, unknown> = {}): void {
   if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
   const line = JSON.stringify({
@@ -232,6 +255,10 @@ function logSupervisor(event: string, extra: Record<string, unknown> = {}): void
     // Last-resort: write to stderr so launchd captures it.
     process.stderr.write(line + "\n");
   }
+  // Mirror (not fall back) so the container's only log sink sees supervisor
+  // events too — previously these reached stdout ONLY when the file write
+  // failed, which is why `docker logs` was empty on a healthy container.
+  if (MIRROR_TO_STDOUT) process.stdout.write(line + "\n");
 }
 
 // ---- Spawning + restart loop -----------------------------------------
@@ -280,8 +307,15 @@ async function spawnChild(state: ChildState): Promise<void> {
     detached: true,
   });
   state.proc = proc;
-  proc.stdout?.pipe(logStream);
-  proc.stderr?.pipe(logStream);
+  // Exactly one destination, never both — that is what keeps FRI-116 fixed.
+  // Under launchd the child's own stdout is off, so the supervisor's pipe IS
+  // the file copy. In a container the child writes its own file and the
+  // supervisor forwards the same lines to its stdout instead, where
+  // `docker logs` can see them. `end: false` stops a child exit from closing
+  // the supervisor's stdout and silencing everything afterwards.
+  const sink = MIRROR_TO_STDOUT ? process.stdout : logStream;
+  proc.stdout?.pipe(sink, { end: false });
+  proc.stderr?.pipe(sink, { end: false });
 
   proc.on("exit", (code, signal) => {
     state.proc = null;
