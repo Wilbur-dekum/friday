@@ -115,6 +115,14 @@ services:
       # (one superuser reaches every database on a shared cluster) — FRI-2005.
       FRIDAY_ADMIN_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
       FRIDAY_DATA_DIR: /data
+      # FRI-2060: agent credentials. Headless by necessity — the CLI's
+      # subscription OAuth needs an interactive login and a persisted
+      # credential dir, which an unattended Deployment cannot do. An API key
+      # is also what BOTH arms of ADR-051's Capacity source reduce to
+      # (`friday` = our org key, `byo` = the customer's), so dev and cloud
+      # authenticate the same way. Unset here: export it in your shell, or put
+      # it in the vault as ANTHROPIC_API_KEY.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # FRI-2011: the public origin the browser actually uses. BetterAuth
       # generates cookies and redirects against this, and asserts it is a
       # trusted origin — so a mismatch fails loudly here instead of silently

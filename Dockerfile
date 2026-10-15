@@ -59,6 +59,22 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm run build
 
+# FRI-2060: drop the musl build of the Agent SDK's bundled Claude Code binary.
+#
+# The SDK ships the CLI itself as eight platform-specific optionalDependencies,
+# so no separate install is needed. pnpm installs BOTH linux variants for this
+# arch, and the SDK then picks musl on a glibc image: executing it fails with
+# ENOENT because the musl loader is absent, which the SDK reports as the
+# misleading "Claude Code native binary not found" even though the file is
+# there. Removing it leaves the glibc binary as the only candidate.
+#
+# Also ~235MB — on an image this size that is not a rounding error (FRI-2054).
+# Pruned in the BUILDER, not the runtime stage: a first attempt deleted it
+# after `WORKDIR /app` but BEFORE `COPY --from=builder`, so it removed nothing
+# and the copy brought it straight back.
+RUN rm -rf /app/node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-*-musl@* \
+  && test ! -d /app/node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-arm64-musl@0.2.132
+
 # ---- runtime ---------------------------------------------------------------
 FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 
