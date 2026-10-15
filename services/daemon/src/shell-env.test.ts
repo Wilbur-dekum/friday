@@ -651,3 +651,43 @@ describe("B1: secret leak prevention through captureShellEnv (end-to-end)", () =
   // / FALLBACK gates above are the load-bearing B1 fences in the new
   // architecture.
 });
+
+describe("secret-key coverage after containerisation (FRI-2012)", () => {
+  it("catches the keys that only started riding in env once we containerised", () => {
+    // Measured in the compose stack: the daemon carries both of the first two.
+    // FRIDAY_ADMIN_DATABASE_URL is the SUPERUSER connection — on ADR-051's
+    // shared cluster that one credential reaches every Deployment's database.
+    expect(isSecretKey("DATABASE_URL")).toBe(true);
+    expect(isSecretKey("FRIDAY_ADMIN_DATABASE_URL")).toBe(true);
+    expect(isSecretKey("FRIDAY_AGE_IDENTITY")).toBe(true);
+    expect(isSecretKey("FRIDAY_AGE_IDENTITY_FILE")).toBe(true);
+  });
+
+  it("catches SSH_AUTH_SOCK — a delegated capability, not a credential", () => {
+    // Nothing is readable through it, but a worker holding it authenticates
+    // as the operator to any host or repo their keys reach.
+    expect(isSecretKey("SSH_AUTH_SOCK")).toBe(true);
+  });
+
+  it("catches a *_DATABASE_URL added later, without anyone editing the list", () => {
+    expect(isSecretKey("ANALYTICS_DATABASE_URL")).toBe(true);
+    expect(isSecretKey("SOME_CONNECTION_STRING")).toBe(true);
+    expect(isSecretKey("WAREHOUSE_DSN")).toBe(true);
+  });
+
+  it("still lets ordinary keys through", () => {
+    for (const k of ["PATH", "HOME", "LANG", "TMPDIR", "NODE_ENV", "FRIDAY_DATA_DIR"]) {
+      expect(isSecretKey(k)).toBe(false);
+    }
+  });
+
+  it("sanitizeEnv drops exactly the secret-shaped keys", () => {
+    const out = sanitizeEnv({
+      PATH: "/usr/bin",
+      FRIDAY_ADMIN_DATABASE_URL: "postgresql://postgres:su@db/postgres",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      HOME: "/home/friday",
+    });
+    expect(Object.keys(out).sort()).toEqual(["HOME", "PATH"]);
+  });
+});

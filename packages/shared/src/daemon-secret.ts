@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { DATA_DIR } from "./config.js";
+import { isContainer } from "./container.js";
 
 /**
  * Per-installation shared secret used to authenticate same-host callers of
@@ -114,7 +115,10 @@ function verifyDaemonSecretPermissions(): void {
   const verdict = classifySecretMode({
     perm,
     repaired,
-    containerized: process.pid === 1,
+    // FRI-2008: `process.pid === 1` was wrong here — only the supervisor is
+    // PID 1, and this runs in the daemon and dashboard too, where it was
+    // silently false. isContainer() propagates via env.
+    containerized: isContainer(),
   });
   if (verdict === "ok") return;
 

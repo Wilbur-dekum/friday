@@ -30,6 +30,7 @@ import {
   updateBlock,
 } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
+import { sanitizedProcessEnvForChild } from "../shell-env.js";
 import { logger } from "../log.js";
 import { captureFor } from "../posthog.js";
 import { type ArchiveReason } from "@friday/shared";
@@ -416,8 +417,13 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // daemon (post-loadFridayConfig refactor that's clean of secrets) plus
   // CI / COREPACK_* overrides, then run `$SHELL -ilc` to layer the
   // user's interactive shell env on top of that.
+  // FRI-2012: sanitized, not raw. `sanitizedProcessEnvForChild()` already
+  // existed as the INPUT gate for the shell-capture child but was never
+  // applied here, so the worker — which is where untrusted repo code actually
+  // runs — inherited everything. Measured in the compose stack, that included
+  // FRIDAY_ADMIN_DATABASE_URL, the superuser connection string.
   const env = {
-    ...process.env,
+    ...sanitizedProcessEnvForChild(),
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
     CI: "1",
   };

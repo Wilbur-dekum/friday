@@ -13,6 +13,7 @@ export * from "./claude-sessions.js";
 export * from "./hooks/index.js";
 export * from "./prompts/loader.js";
 export * from "./apps/manifest.js";
+export * from "./container.js";
 export * from "./db/client.js";
 export * from "./db/migrate.js";
 export * as schema from "./db/schema.js";

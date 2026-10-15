@@ -71,6 +71,10 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
+# Propagating container signal — see packages/shared/src/container.ts.
+# Only the supervisor is PID 1, so a pid check is false in the daemon,
+# the dashboard and every worker; env inheritance reaches all of them.
+ENV FRIDAY_CONTAINER=1
 # Never the image filesystem: this is the Deployment's persistent volume.
 ENV FRIDAY_DATA_DIR=/data
 # The SDK writes session transcripts to $HOME/.claude/projects/<cwd>/<id>.jsonl,
