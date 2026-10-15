@@ -369,7 +369,7 @@ docker compose exec -e FRIDAY_DEV_SEED=1 friday \
   node packages/cli/scripts/dev-seed.mjs
 ```
 
-Then <http://localhost:7615> — `dev@friday.test` / `friday-dev-password`. Agents don't run: the `claude` CLI is deliberately absent from the image. Caveats and configuration: [docs/running.md](docs/running.md#container-dev-stack).
+Then <http://friday.localhost> — `dev@friday.test` / `friday-dev-password`. Agents don't run: the `claude` CLI is deliberately absent from the image. Caveats and configuration: [docs/running.md](docs/running.md#container-dev-stack).
 
 ### Testing
 

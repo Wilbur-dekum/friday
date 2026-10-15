@@ -40,6 +40,12 @@ if (resolvedPort !== PROD_DASHBOARD_PORT && localUrl !== DEV_DASHBOARD_LOCAL) {
 }
 if (cfg.publicUrl) trustedOrigins.push(cfg.publicUrl);
 if (process.env.BETTER_AUTH_URL) trustedOrigins.push(process.env.BETTER_AUTH_URL);
+// FRI-2011: PUBLIC_BASE_URL was asserted against this list below but never
+// added to it, so setting it — the obvious name to reach for when putting the
+// dashboard behind a proxy — guaranteed a boot hard-exit. Either it is a
+// supported way to name the public origin or it should not be asserted; it is
+// listed as a source, so make it one.
+if (process.env.PUBLIC_BASE_URL) trustedOrigins.push(process.env.PUBLIC_BASE_URL);
 
 // FIX_FORWARD 5.10: assert any configured public base URL is actually in
 // trustedOrigins. Defends against a future refactor that drops the

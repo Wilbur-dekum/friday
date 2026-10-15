@@ -117,6 +117,20 @@ zero-cache needs a logical replication slot, and a host zero-cache already holds
 
 `packaging/dev-initdb/` stands in for what the Control plane does in the cloud: a **superuser** creates the `friday` role and the `vector` extension _before_ the Deployment starts, and the Deployment's own role never holds the privilege to do either (ADR-044, ADR-051). `FRIDAY_ADMIN_DATABASE_URL` carries that superuser connection; `DATABASE_URL` carries the application one. They are deliberately different — pointing `CREATE EXTENSION` at `DATABASE_URL` fails on permissions rather than working.
 
+### Hostname and the reverse proxy
+
+The stack runs behind a Caddy reverse proxy on **<http://friday.localhost>**, not bare `localhost:7615`. That is deliberate: BetterAuth derives absolute URLs, the CSRF origin list and the session cookie's `Secure`/`__Secure-` prefix from its `baseURL`, and **hard-exits** when a configured public URL is not among `trustedOrigins`. Exercising a real hostname in dev is the only way to meet that before a Deployment does.
+
+`*.localhost` resolves to 127.0.0.1 in browsers (RFC 6761, implemented client-side), so the URL just works in Chrome, Firefox and Safari. The **macOS system resolver does not**, so curl and scripts need an explicit mapping:
+
+```bash
+curl --resolve friday.localhost:80:127.0.0.1 http://friday.localhost/login
+```
+
+`BETTER_AUTH_URL` is set to the same origin in compose. Three env vars can name the public origin — `BETTER_AUTH_URL`, `PUBLIC_BASE_URL`, and `config.publicUrl` — and all three are both trusted and asserted. Port 7615 is still published directly, so `http://localhost:7615` keeps working for anything that would rather skip the proxy.
+
+Not covered yet: **TLS**. The cloud serves HTTPS, and BetterAuth switches the cookie to the `__Secure-` prefix on an `https://` baseURL — a difference this proxy does not exercise. Caddy can issue a local certificate from its internal CA if that path needs testing.
+
 ### Secrets
 
 Integration secrets live in an age-encrypted vault at `$FRIDAY_DATA_DIR/secrets/vault.enc`. The identity that decrypts it resolves in order:
