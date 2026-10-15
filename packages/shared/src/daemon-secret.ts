@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { DATA_DIR } from "./config.js";
@@ -56,26 +56,80 @@ export function getDaemonSecret(): string {
   throw new Error(`failed to read or create daemon secret at ${DAEMON_SECRET_PATH}`);
 }
 
+/** What to do about a daemon-secret file whose mode is too permissive. */
+export type SecretModeVerdict = "ok" | "warn" | "fatal";
+
 /**
- * FIX_FORWARD 5.9: after reading the daemon-secret file, assert that no
- * group/other bits are set (`mode & 0o077 === 0`). If the file is
- * group- or world-readable, any other user on a shared machine could
- * impersonate the daemon's clients — log fatally and exit immediately
- * so the operator sees the issue at startup, not after the breach.
+ * FRI-2009: decide how to react to the file's permissions.
+ *
+ * FIX_FORWARD 5.9 made any group/other bit a fatal exit, which is right on a
+ * shared machine: another OS user who can read the secret can impersonate the
+ * daemon's clients. It is wrong for a *provided* secret. ADR-051 moves the
+ * daemon secret into the platform secret manager, and those arrive read-only
+ * at 0644 (Kubernetes) or 0444 (Docker secrets) — so the same check becomes a
+ * boot crash-loop whose remedy ("run chmod") cannot be followed on a read-only
+ * mount. The loose bits also mean something different there: they expose the
+ * file to other processes *inside this container*, which are all Friday's own,
+ * not to other tenants.
+ *
+ * So: repair it when we can, and only refuse to start when the exposure is
+ * real and unfixable.
+ *
+ * Pure, so every branch is testable without a real file or a real container.
  */
+export function classifySecretMode(opts: {
+  /** The file's permission bits (`st.mode & 0o777`). */
+  perm: number;
+  /** Whether a chmod back to 0600 succeeded. */
+  repaired: boolean;
+  /** Whether we are PID 1 — i.e. a container, where the file is not shared
+   *  with other users, only with our own processes. */
+  containerized: boolean;
+}): SecretModeVerdict {
+  if ((opts.perm & 0o077) === 0) return "ok";
+  if (opts.repaired) return "ok";
+  // Could not fix it. On a shared host the original reasoning stands.
+  // In a container, refusing to boot is worse than the exposure it prevents.
+  return opts.containerized ? "warn" : "fatal";
+}
+
 function verifyDaemonSecretPermissions(): void {
   // Windows reports mode bits as 0666; the check is meaningful only on
   // unix-y filesystems where chmod 0600 is enforced.
   if (process.platform === "win32") return;
-  const st = statSync(DAEMON_SECRET_PATH);
-  const perm = st.mode & 0o777;
-  if ((perm & 0o077) !== 0) {
-    const octal = perm.toString(8).padStart(3, "0");
-    const msg = `FATAL: daemon-secret file ${DAEMON_SECRET_PATH} has mode ${octal} (group/other bits set). Run: chmod 0600 ${DAEMON_SECRET_PATH}`;
+  const perm = statSync(DAEMON_SECRET_PATH).mode & 0o777;
 
-    console.error(msg);
-    process.exit(1);
+  let repaired = false;
+  if ((perm & 0o077) !== 0) {
+    // Self-heal first. A file we own on a writable volume just gets fixed;
+    // only a read-only or foreign-owned mount reaches the verdict below.
+    try {
+      chmodSync(DAEMON_SECRET_PATH, 0o600);
+      repaired = (statSync(DAEMON_SECRET_PATH).mode & 0o077) === 0;
+    } catch {
+      repaired = false;
+    }
   }
+
+  const verdict = classifySecretMode({
+    perm,
+    repaired,
+    containerized: process.pid === 1,
+  });
+  if (verdict === "ok") return;
+
+  const octal = perm.toString(8).padStart(3, "0");
+  if (verdict === "warn") {
+    console.warn(
+      `WARN: daemon-secret file ${DAEMON_SECRET_PATH} has mode ${octal} (group/other bits set) and could not be chmod'd — it is probably a read-only secret mount. Continuing: inside a container those bits expose it only to this container's own processes. Set the mount's mode to 0600 to silence this.`,
+    );
+    return;
+  }
+
+  console.error(
+    `FATAL: daemon-secret file ${DAEMON_SECRET_PATH} has mode ${octal} (group/other bits set) and could not be repaired automatically. On a shared machine any other user can read it and impersonate the daemon's clients. Run: chmod 0600 ${DAEMON_SECRET_PATH}`,
+  );
+  process.exit(1);
 }
 
 export const DAEMON_SECRET_HEADER = "x-friday-daemon-secret";
