@@ -10,6 +10,7 @@ import {
   resolveDashboardPort,
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
+import { isContainer } from "@friday/shared";
 import { FRIDAY_LAUNCHD_LABEL } from "../lib/launchd.js";
 import { readBlockedState, formatRemedies } from "../lib/deps.js";
 
@@ -133,14 +134,24 @@ export const statusCommand = defineCommand({
 
     console.log(pc.bold("Friday status"));
 
-    // Supervisor (launchd job com.sethvoltz.friday)
-    const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
+    // FRI-2006: in a container there is no launchd to ask, and asking anyway
+    // printed "supervisor down (run friday start)" directly above a line
+    // reporting the daemon reachable — self-contradictory, and the wrong
+    // answer to the one question status exists to answer. The supervisor is
+    // this container's init-managed process; its liveness is the container's.
+    const fridayJob: LaunchdJob = isContainer()
+      ? { loaded: true, pid: process.pid }
+      : launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
     if (fridayJob.loaded) {
       const detail =
         fridayJob.pid !== undefined
           ? `pid=${fridayJob.pid}`
           : "(loaded; no current pid — restarting?)";
-      console.log(`  supervisor  ${pc.green("up")}  ${detail}  (launchd: ${FRIDAY_LAUNCHD_LABEL})`);
+      console.log(
+        isContainer()
+          ? `  supervisor  ${pc.green("up")}  ${detail}  (container-managed)`
+          : `  supervisor  ${pc.green("up")}  ${detail}  (launchd: ${FRIDAY_LAUNCHD_LABEL})`,
+      );
     } else {
       console.log(`  supervisor  ${pc.dim("down")}  (run ${pc.cyan("friday start")})`);
     }

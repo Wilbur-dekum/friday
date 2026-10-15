@@ -117,6 +117,14 @@ zero-cache needs a logical replication slot, and a host zero-cache already holds
 
 `packaging/dev-initdb/` stands in for what the Control plane does in the cloud: a **superuser** creates the `friday` role and the `vector` extension _before_ the Deployment starts, and the Deployment's own role never holds the privilege to do either (ADR-044, ADR-051). `FRIDAY_ADMIN_DATABASE_URL` carries that superuser connection; `DATABASE_URL` carries the application one. They are deliberately different — pointing `CREATE EXTENSION` at `DATABASE_URL` fails on permissions rather than working.
 
+### Lifecycle in a container
+
+The container runs `tini` as PID 1 (`init: true`) with the supervisor beneath it. Node does not reap orphaned grandchildren — measured, four orphans left four `Z` entries parented to PID 1 — and agent workers spawn detached and run build tools that fork, so over a long-lived Deployment the process table fills. Signal handling was already fine (`docker stop` completes in ~0.6s, well inside the grace period); only reaping needed fixing.
+
+`friday start` / `stop` / `restart` are aliases over `launchctl`, which does not exist here. They now **refuse with an explanation** rather than silently doing nothing, and exit 1. Lifecycle belongs to the container runtime: `docker compose stop`, or whatever restarts the Deployment in your orchestrator.
+
+`friday status` still works and is the way to ask "is this running?" — it probes the stack instead of asking launchd, and reports `supervisor up … (container-managed)`.
+
 ### Hostname and the reverse proxy
 
 The stack runs behind a Caddy reverse proxy on **<http://friday.localhost>**, not bare `localhost:7615`. That is deliberate: BetterAuth derives absolute URLs, the CSRF origin list and the session cookie's `Secure`/`__Secure-` prefix from its `baseURL`, and **hard-exits** when a configured public URL is not among `trustedOrigins`. Exercising a real hostname in dev is the only way to meet that before a Deployment does.

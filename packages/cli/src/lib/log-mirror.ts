@@ -1,3 +1,5 @@
+import { isContainer } from "@friday/shared";
+
 /**
  * Whether the supervisor mirrors logs to stdout (FRI-2053).
  *
@@ -10,13 +12,16 @@
  */
 export function resolveMirrorToStdout(
   flag: string | undefined,
-  pid: number = process.pid,
+  containerized: boolean = isContainer(),
 ): boolean {
   // Explicit wins in both directions — same knob the children already use.
   if (flag === "on") return true;
   if (flag === "off") return false;
-  // Otherwise infer from the role: a container runs the supervisor as init,
-  // launchd never does. So a container gets logs with no configuration and
-  // the laptop's behaviour is unchanged.
-  return pid === 1;
+  // Otherwise infer from the environment, NOT from being PID 1.
+  //
+  // FRI-2006: adding `init: true` put tini at PID 1 and moved the supervisor to
+  // PID 7 — which silently switched this off and undid FRI-2053, with no error
+  // anywhere. `isContainer()` reads FRIDAY_CONTAINER from the image, so it
+  // survives anything that reshuffles the process tree.
+  return containerized;
 }

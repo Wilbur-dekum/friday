@@ -11,26 +11,35 @@ import { describe, expect, it } from "vitest";
 import { resolveMirrorToStdout } from "./log-mirror.js";
 
 describe("resolveMirrorToStdout", () => {
-  it("mirrors when running as PID 1 — the container case", () => {
-    expect(resolveMirrorToStdout(undefined, 1)).toBe(true);
+  it("mirrors in a container", () => {
+    expect(resolveMirrorToStdout(undefined, true)).toBe(true);
   });
 
   it("does not mirror under launchd, where the plist already captures stdout", () => {
-    expect(resolveMirrorToStdout(undefined, 4242)).toBe(false);
+    expect(resolveMirrorToStdout(undefined, false)).toBe(false);
   });
 
-  it("honours an explicit `on` even when not PID 1", () => {
-    expect(resolveMirrorToStdout("on", 4242)).toBe(true);
+  it("honours an explicit `on` outside a container", () => {
+    expect(resolveMirrorToStdout("on", false)).toBe(true);
   });
 
-  it("honours an explicit `off` even as PID 1", () => {
+  it("honours an explicit `off` inside a container", () => {
     // The escape hatch matters: a container operator shipping logs by some
     // other route must be able to silence the duplicate stream.
-    expect(resolveMirrorToStdout("off", 1)).toBe(false);
+    expect(resolveMirrorToStdout("off", true)).toBe(false);
   });
 
   it("treats an unrecognised value as unset rather than truthy", () => {
-    expect(resolveMirrorToStdout("yes", 4242)).toBe(false);
-    expect(resolveMirrorToStdout("", 1)).toBe(true);
+    expect(resolveMirrorToStdout("yes", false)).toBe(false);
+    expect(resolveMirrorToStdout("", true)).toBe(true);
+  });
+});
+
+describe("resolveMirrorToStdout — FRI-2006 regression", () => {
+  it("does not depend on being PID 1", () => {
+    // Adding `init: true` put tini at PID 1 and moved the supervisor to PID 7,
+    // which silently switched stdout logging off and undid FRI-2053 with no
+    // error anywhere. The signal must survive a reshuffled process tree.
+    expect(resolveMirrorToStdout(undefined, true)).toBe(true);
   });
 });
