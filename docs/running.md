@@ -128,7 +128,18 @@ friday stop                                   # source must be quiet
 pg_dump -Fc -d friday -f friday.dump
 pg_restore -h localhost -p 5433 -U postgres -d friday \
   --clean --if-exists --no-owner --no-privileges friday.dump
+psql -h localhost -p 5433 -U postgres -d friday \
+  -v ON_ERROR_STOP=1 -f packaging/pg-reassign-owner.sql
 ```
+
+**The last step is not optional either.** The restore has to connect as a superuser, because the dump recreates the `vector` extension and `CREATE EXTENSION` is not a privilege the `friday` role holds. But `--no-owner` means "owned by the _connecting_ role" — so every schema, table and sequence lands owned by `postgres`, while the daemon connects as `friday`. Postgres reports a clean restore, and the daemon then crash-loops on boot:
+
+```
+daemon.fatal   permission denied for schema drizzle
+PostgresError  permission denied for schema zero
+```
+
+`packaging/pg-reassign-owner.sql` hands those objects back to `friday`. It is idempotent, and it ends with a verification query that must return zero rows. (`REASSIGN OWNED BY postgres TO friday` does not work here — postgres is a bootstrap superuser and the server refuses it outright.)
 
 Then compare row counts on both sides. `CENSUS_TABLES` in `packages/shared/src/db/row-census.ts` lists the tables whose **only** copy is Postgres — `tickets`, `blocks`, `mail`, `habits`, `schedules`, `inbox_items` and friends. A mismatch there is data loss. `memory_entries` is deliberately excluded: memory is canonical as `memory/entries/*.md` with the database as a searchable mirror, so its count can legitimately differ after a reindex.
 
