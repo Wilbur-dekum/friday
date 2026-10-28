@@ -6,8 +6,10 @@ The same tickets are loaded into Friday's own `tickets` table so Friday can work
 them functionally, but that copy is operational — it lives in one Postgres
 database, while this one is in git. If the two ever disagree, this wins.
 
-Ids run from `FRI-2001`. The first 51 were the initial plan; later ids are work
-uncovered while executing it, filed under the epic they belong to. The counter was seeded past the
+Ids run from `FRI-2001`. The first 51 (`FRI-2001`–`FRI-2051`) were the initial
+plan; later ids are work uncovered while executing it, filed under the epic they
+belong to — or under **E6**, the cleanup/backlog epic, when they block no epic
+at all. The counter was seeded past the
 external tracker's range (~200 `FRI-nnn` identifiers are already referenced
 throughout these docs) so locally-created ids cannot collide; see the
 short-UUID entry in [decisions.md](decisions.md) § Watch list for the durable
@@ -342,28 +344,49 @@ Fix: emit JSONL on stdout (the format is already right for collectors) when
 running in a container, either by switching destination on an env flag or by
 dual-writing. Covers all four processes, not just the supervisor.
 
-### FRI-2054 — Prune the container image (currently 1149 MB)
+### FRI-2052 — CLI hangs 30s after every command — pg pool never closed
 
-`task` · parent FRI-2001 · ADR-050, ADR-051
+`task` · parent FRI-2001 · ADR-050
 
-The FRI-2002 image is **1149 MB**. The builder stage runs a full
-(non-prod) `pnpm install` so turbo can build, and the runtime stage then
-`COPY --from=builder /app /app` wholesale — so dev dependencies, TypeScript
-sources and build caches all ship.
+Every `friday <subcommand>` except `doctor` finished its work in well under a
+second and then sat idle for ~30s. `getDbAndPool()` builds a pg `Pool` with
+`idleTimeoutMillis: 30_000`; `closeDb()` existed but only `doctor` called it,
+and the CLI entry point had no teardown. The idle client kept a live socket on
+the event loop, so Node refused to exit until the timer fired.
 
-Options, roughly in order of payoff: a prod-only dependency tree in the runtime
-stage (`pnpm prune --prod`, or a separate prod install); drop sources,
-`tsconfig`s and test files; copy only each package's `dist`/`build` plus the
-prod `node_modules`.
+Measured: `time friday tickets ls` → 30.48s wall, 0.49s user, 1% CPU. Blocked,
+not computing. Fixed with a root `cleanup()` that calls `closeDb()`.
 
-Constraint to respect: the supervisor's `findRepoRoot()` walks up looking for
-`pnpm-workspace.yaml`, so whatever the runtime layout becomes must still contain
-that file at the tree root.
+### FRI-2058 — Does BetterAuth enforce trustedOrigins on sign-in?
 
-Worth folding in while here: the ~23 MB embedding model (quantized ONNX,
-all-MiniLM-L6-v2) is fetched at setup/update into `$FRIDAY_DATA_DIR/models/`.
-Baking it into the image instead means Deployments do not each download it, and
-semantic recall works on first boot rather than degrading fail-open to FTS.
+`task` · parent FRI-2001 · ADR-051
+
+Filed as an observation, not a confirmed vulnerability, so it would get a
+proper look rather than be asserted either way from inference. A sign-in POST
+carrying `Origin: http://evil.example` — an origin never in `trustedOrigins` —
+returned 200 with a valid session cookie.
+
+Pre-existing, and NOT introduced by FRI-2011, which only added
+`PUBLIC_BASE_URL` to the trusted list. Resolved: closed after review.
+
+### FRI-2065 — Claude SDK transcripts are never captured, so migrated agents wedge-loop
+
+`bug` · parent FRI-2001 · ADR-050
+
+`friday backup --full` reported **0 claude session(s)** on an install whose
+agents all had live sessions. Backup derives the project dir from
+`agentWorkingDir` (`~/.friday/agents/<name>`); the daemon actually ran those
+agents from the install directory, so the encoded-cwd never matches and the
+capture finds nothing.
+
+`agents.session_id` IS restored while the transcripts are not, so after a
+migration every agent points at a session the SDK cannot resume, produces zero
+content blocks, and the wedge detector restarts the worker — measured at ~2.6
+error blocks/sec with no backoff and no ceiling. The cutover currently needs a
+manual `UPDATE agents SET session_id = NULL` (documented in `running.md`).
+
+Stays on E1 rather than moving to the backlog: FRI-2050's export and ADR-051's
+shared→dedicated move both inherit this backup-fidelity gap.
 
 ---
 
@@ -628,6 +651,26 @@ Unify so the durable-thread case is not a special case: the web UI becomes a
 Transport whose external thread happens to be long-lived. Keeps the rule uniform
 — every turn arrives on a Transport — and avoids a branch in reply routing.
 
+### FRI-2067 — CLI Transport: a local terminal client against a remote Deployment
+
+`task` · parent FRI-2029 · ADR-052, ADR-050, ADR-053
+
+A local command-line client that talks to a REMOTE Friday and feels like the
+original Claude Code. This is a **Transport** in ADR-052's sense, not a second
+application: it gets its own **Transport style** (terse, streaming, no markdown
+a terminal cannot render) and joins the SAME Conversation the web dashboard and
+Slack see — a good forcing function for that decision, because a terminal user
+notices missing context immediately.
+
+Distinct from today's `friday` CLI, which is local administration over a
+loopback daemon. This authenticates to a Deployment's public surface as a User
+and holds no local state.
+
+Constraint to respect: do not start before FRI-2030's Transport registry, or it
+becomes a bespoke integration instead of a Transport. The sizing question is
+whether it executes tools LOCALLY — a view onto a remote agent is small; a
+local tool-execution bridge is a much larger design and should be split out.
+
 ---
 
 ## FRI-2036 — E4: Agent isolation
@@ -730,6 +773,38 @@ targets macOS surfaces with no Linux analog (`~/Library/Keychains`, `launchctl`,
 `osascript`, `tccutil`), and M5's `ulimit -t`/`-n` were chosen for _Darwin_
 semantics. Containment becomes cgroups plus container lifetime; the doc needs
 rewriting around that rather than patching.
+
+### FRI-2059 — Scrub the Claude Code child's env — the real untrusted-code boundary
+
+`task` · parent FRI-2036 · ADR-054
+
+FRI-2012 established that the boundary worth defending is one level deeper than
+the worker: the env handed to the Claude Code child in `worker.ts`, which the
+agent's Bash tool and everything it spawns inherit. That is where untrusted
+repository code actually runs.
+
+Not a blanket strip — the CLI needs its own Anthropic credentials to function,
+so this is a deny-list that must not remove them. Moved from E1 to E4: it is
+ADR-054's boundary, and E1 only ever pulled control 1 forward.
+
+### FRI-2062 — Worker sandbox is silently off in the container
+
+`bug` · parent FRI-2036 · ADR-054
+
+Every worker fork in the compose stack logs
+`"sandboxed":false,"sandboxReason":"binary-not-found"`. `docs/sandbox.md`
+describes isolation as M1–M5 built on `sandbox-exec`, which is macOS-only and
+absent from the Linux image — so the sandbox degrades **fail-open**, and the
+only signal is one field on a per-fork log line.
+
+This inverts E4's premise: the plan says "the container is the sandbox", but
+today the container is LESS isolated than the Mac was. Decide and implement
+either a Linux equivalent (seccomp/landlock, bubblewrap, container-per-worker)
+or an explicit decision that the Deployment boundary IS the sandbox, with the
+residual risk written into `docs/sandbox.md`.
+
+Either way the fail-open must get loud: a startup warning when the configured
+sandbox is unavailable. Silent degradation of a security control is the defect.
 
 ---
 
@@ -851,3 +926,156 @@ two separate costs, and only one of them is capped by a date. Measured idle
 infrastructure cost at decision time was ~700 MB RSS across ~29 processes per
 Deployment doing nothing, with zero-cache about 57% of it, and scale-to-zero is
 largely unavailable because always-on is the product.
+
+### FRI-2056 — Configure a GitHub App so releases work on this fork
+
+`task` · parent FRI-2044 · ADR-034
+
+release-please needs credentials this fork does not have; the workflow now
+carries a guard step that skips the release job when they are absent, so CI is
+green but nothing ships.
+
+Parented to E5 rather than the backlog because FRI-2049 (fleet upgrade
+orchestration) cannot be built or tested without a working release pipeline —
+there is nothing to orchestrate the upgrade of.
+
+---
+
+## FRI-2068 — E6: Cleanup and backlog
+
+The holding epic for work that is real but blocks no other epic.
+
+E1–E5 each carry a goal and a done-when. This one deliberately does not. Its
+purpose is to keep those five honest: a ticket parked here can be picked up
+whenever there is slack, and leaving it inside a goal-bearing epic would
+misreport that epic's completeness.
+
+**Admission rule.** A ticket belongs here when no task in E1–E5 can be blocked
+by it. A ticket that is merely LOW PRIORITY but does block an epic task stays
+with that epic — priority and blocking are different axes, and only blocking
+decides placement.
+
+### FRI-2054 — Prune the container image (currently 1149 MB)
+
+`task` · parent FRI-2068 · ADR-050, ADR-051
+
+The FRI-2002 image is **1149 MB**. The builder stage runs a full
+(non-prod) `pnpm install` so turbo can build, and the runtime stage then
+`COPY --from=builder /app /app` wholesale — so dev dependencies, TypeScript
+sources and build caches all ship.
+
+Options, roughly in order of payoff: a prod-only dependency tree in the runtime
+stage (`pnpm prune --prod`, or a separate prod install); drop sources,
+`tsconfig`s and test files; copy only each package's `dist`/`build` plus the
+prod `node_modules`.
+
+Constraint to respect: the supervisor's `findRepoRoot()` walks up looking for
+`pnpm-workspace.yaml`, so whatever the runtime layout becomes must still contain
+that file at the tree root.
+
+Worth folding in while here: the ~23 MB embedding model (quantized ONNX,
+all-MiniLM-L6-v2) is fetched at setup/update into `$FRIDAY_DATA_DIR/models/`.
+Baking it into the image instead means Deployments do not each download it, and
+semantic recall works on first boot rather than degrading fail-open to FTS.
+
+### FRI-2055 — Playwright e2e suite is flaky
+
+`bug` · parent FRI-2068
+
+Red CI is currently indistinguishable from a real failure, so every failing PR
+costs a manual investigation — directly undermining the signal CI exists to
+give. Three distinct specs failed across three branches including `main`
+(`memory-redesign`, `chat-inner-scroll`, `chat-send-target`), and one PR went
+green on a re-run with no code change. All three are scroll/visibility
+assertions.
+
+### FRI-2057 — Evaluate Retrofit (retrofit.sh) for schema migrations
+
+`task` · parent FRI-2068
+
+Evaluate replacing or fronting Drizzle's migrator with Retrofit: PostgreSQL-only,
+records each change as one line in a git-tracked oplog, generates forward AND
+reverse migrations.
+
+Interesting here specifically because it orders changes by sequential identity
+numbers rather than timestamps — which makes our single worst silent
+upgrade-bricker (a fabricated or rounded `when`) structurally impossible instead
+of something CLAUDE.md polices by discipline. Reverse migrations also matter to
+ADR-051's fleet-upgrade story.
+
+An evaluation, not a commitment.
+
+### FRI-2061 — Stale policy-limits cache on the HOME volume blocks all turns
+
+`bug` · parent FRI-2068
+
+A Deployment can cache a transient authorization failure and keep refusing every
+turn after the cause is fixed, with nothing in the error pointing at the cache.
+
+Observed: turns failed with "Credit balance is too low" while the key was
+unfunded — correct at the time. After funding, the same error persisted across
+container restarts, while a direct `curl` with that exact key succeeded.
+`$HOME/.claude/policy-limits.json` held `"allowed": false` and was preferred
+over a live check; deleting it fixed it immediately.
+
+Matters more in a Deployment than on a laptop: `$HOME` is a persistent volume,
+so the stale denial outlives the restart an operator would reach for first.
+
+### FRI-2063 — Client-side sync has no diagnosable failure signal
+
+`task` · parent FRI-2068
+
+The dashboard sat on "Syncing your data" for ~10 minutes against a freshly
+booted stack. It resolved on its own and a deliberate cold-replica reload would
+not reproduce it, so the stall itself is not actionable — but nothing recorded
+why. The client emitted zero console output, the only server-side signal was the
+presence or absence of a `zero-proxy.upgrade.accepted` line, and `SyncOverlay`
+renders the same spinner for "connecting", "connected but nothing materialized"
+and "backing off".
+
+Want: log Zero `connection.state` transitions, and after N seconds in `pending`
+surface the actual state and last error instead of an indefinite spinner.
+
+### FRI-2064 — Parameterize the compose stack so two Deployments can run side by side
+
+`task` · parent FRI-2068 · ADR-050, ADR-051
+
+Goal: run the daily driver and a throwaway test Deployment at once, so features
+can be exercised against a copy of real data without risking it.
+
+`docker-compose.yml` hardcodes `80:80`, `7615:7615`, `5433:5432` and
+`BETTER_AUTH_URL`. Ports and volumes are otherwise isolated by project name for
+free; the hostname is the one that bites quietly, because a mismatch with
+`BETTER_AUTH_URL` is a BetterAuth hard-exit.
+
+**Separate DATABASE per Deployment is non-negotiable**, not merely separate
+volumes: a test Deployment running newer code runs migrations at boot and would
+poison production's chain, and both would reconcile `friday_pub` and hold
+replication slots against the same publication.
+
+The half worth designing is the **inert-clone posture**. A clone of production
+is not inert — it comes up with active schedules, the agent registry, and (if
+the vault is copied) live integration tokens, and will fire scheduled turns and
+write to production credentials. Needs schedules paused on restore into a
+non-primary Deployment, a distinct key or usage cap, and integrations scrubbed
+or sandboxed. That is ADR-051's Capacity source / Usage cap question arriving
+early.
+
+### FRI-2066 — A worker with no credentials writes junk blocks forever
+
+`bug` · parent FRI-2068 · ADR-051
+
+With no usable credential the SDK returns `Not logged in · Please run /login`
+as ordinary assistant output. The daemon persists it as an assistant block,
+notices the turn produced nothing useful, and restarts the worker — measured at
+~2.6 blocks/sec indefinitely, stopping only when the container was stopped by
+hand.
+
+FRI-2014 fixed the proximate cause. This is the robustness gap behind it, which
+is independent of WHY auth failed: an expired key, a revoked key, a Capacity
+source misconfiguration, or a BYO key hitting its cap all land here.
+
+Wanted: treat the not-authenticated result as a terminal turn failure rather
+than content (it should never reach the user as a message), surface it as a
+Deployment health problem, and bound the wedge-restart loop generally so no
+failure mode can write unbounded rows into a tenant's database.
