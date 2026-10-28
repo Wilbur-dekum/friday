@@ -158,6 +158,19 @@ curl --resolve friday.localhost:80:127.0.0.1 http://friday.localhost/login
 
 Not covered yet: **TLS**. The cloud serves HTTPS, and BetterAuth switches the cookie to the `__Secure-` prefix on an `https://` baseURL — a difference this proxy does not exercise. Caddy can issue a local certificate from its internal CA if that path needs testing.
 
+### Agent credentials
+
+Agents need the Claude Code CLI **and** a credential. The CLI ships with the Agent SDK itself (eight platform-specific `optionalDependencies`, each carrying a `claude` binary) — nothing extra to install.
+
+Set `ANTHROPIC_API_KEY`. An API key rather than the CLI's subscription OAuth, because OAuth needs an interactive login and a persisted credential directory, which an unattended Deployment cannot do — and an API key is what both arms of ADR-051's **Capacity source** reduce to.
+
+Three places it is read, in order: `process.env`, the vault, then `~/.friday/.env`. For the compose stack, export it in the shell you run `docker compose` from; compose passes it through.
+
+Two traps worth knowing:
+
+- **Only one env file is parsed.** `localEnvPath()` prefers `~/.friday/.env.local` and falls back to `~/.friday/.env` — it does not merge them. If a `.env.local` appears alongside a `.env`, the `.env` stops being read entirely and anything in it silently stops working.
+- **The musl build must stay out of the image.** pnpm installs both linux variants of the SDK's bundled binary; the SDK picks musl on a glibc image, and executing it fails with `ENOENT` for the missing loader — which the SDK reports as the misleading _"Claude Code native binary not found"_ even though the file is present. The Dockerfile prunes it in the builder stage, with an assertion so a silent re-add fails the build.
+
 ### Secrets
 
 Integration secrets live in an age-encrypted vault at `$FRIDAY_DATA_DIR/secrets/vault.enc`. The identity that decrypts it resolves in order:

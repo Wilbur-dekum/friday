@@ -97,11 +97,38 @@ export function loadFridayConfig(): FridayEnvConfig {
   const vaultCache = getVaultCache();
   const daemonOverlay = resolveDaemonFields(vaultCache, (key) => process.env[key]);
 
+  /**
+   * FRI-2060: integration secrets now fall back to `~/.friday/.env`, the way
+   * every other secret already does.
+   *
+   * Platform secrets read `readLocal(…) ?? parsed.X` — process.env, then
+   * `.env.local`, then `.env`. Integration secrets uniquely stopped at the
+   * vault, so a key an operator plainly wrote into `~/.friday/.env` was
+   * parsed out of the file and then dropped, with no warning and no way to
+   * tell from the outside. ADR-037 moved these into the vault for encryption
+   * at rest, which is a production concern; it is not a reason to make a dev
+   * machine unusable without `friday secrets set` ceremony for every key.
+   *
+   * The vault still outranks the file, so nothing about the production story
+   * changes — this only stops a present key being silently ignored.
+   */
   const readIntegration = (key: string, field?: string): string | undefined => {
     const fromEnv = process.env[key];
     if (fromEnv) return fromEnv;
     if (field && daemonOverlay[field as keyof typeof daemonOverlay]) {
       return daemonOverlay[field as keyof typeof daemonOverlay];
+    }
+    const fromFile = parsed[key];
+    if (fromFile) {
+      // Visible, not silent: if the vault is live, say which source won so the
+      // precedence is observable rather than guessed at.
+      if (vaultCache) {
+        console.warn(
+          `WARN: ${key} read from ${ENV_PATH} — the vault is initialised but does not hold it. ` +
+            `Prefer \`friday secrets set ${key} --daemon\`; the vault takes precedence if both are set.`,
+        );
+      }
+      return fromFile;
     }
     return undefined;
   };

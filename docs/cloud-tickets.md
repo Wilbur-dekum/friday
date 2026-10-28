@@ -254,6 +254,57 @@ as `postgresDumpSha256`), and `friday restore` deliberately leaves the tunnel
 dark to avoid split-brain — so there is precedent for restore being a staged,
 careful operation rather than an automatic one.
 
+### FRI-2060 — Agent auth: the `claude` CLI and credentials in the image
+
+`task` · parent FRI-2001 · ADR-050, ADR-051
+
+Agents cannot run in a Deployment: the `claude` CLI is absent from the image
+by design, and nothing supplies agent credentials. The dashboard serves, sync
+works and data is intact, but no turn can complete — so FRI-2014's cutover
+would hand over a Friday that cannot do the one thing it exists for.
+
+Split out of FRI-2014 deliberately. The container must be proven to run a real
+turn BEFORE data moves into it; folded together, auth problems surface while
+the daily driver is down and the migration is half-finished. This half is
+safe and iterable — build, run a turn against the compose stack with the
+throwaway dev account, repeat — at no risk to real data.
+
+TWO PIECES.
+
+1. The CLI binary. `@anthropic-ai/claude-agent-sdk` ships no executable: it
+   resolves one through `pathToClaudeCodeExecutable` and errors "Claude Code
+   executable not found" when absent (verified in node_modules 0.2.132 —
+   `bin` is null). `doctor` checks `which claude` and suggests a curl|bash
+   installer or `brew install --cask`, neither of which suits an image.
+   Prefer a pinned npm install of the CLI package over curl|bash: ADR-034
+   pins GitHub Actions by full SHA precisely because an unpinned third-party
+   fetch is a supply-chain injection point, and the same reasoning applies to
+   an installer piped into a Dockerfile.
+
+2. Credentials, and this is the decision. The SDK's child gets its
+   authentication from the environment. Two mechanisms exist:
+   - **API key** — headless, no interactive step, and it is what BOTH arms of
+     ADR-051's Capacity source reduce to (`friday` = our org key, `byo` = the
+     customer's). `ANTHROPIC_API_KEY` is already a supported vault secret, so
+     the plumbing is mostly there.
+   - **Subscription OAuth** — the `claude` CLI's logged-in session. Needs an
+     interactive login and a persisted credential directory, and cannot work
+     for an unattended Deployment.
+
+   RECOMMENDATION: API key. Subscription auth stays the local-dev convenience
+   it already is. Baking a laptop-shaped login into the image would be a dead
+   end for E5.
+
+WATCH FOR: FRI-2059 is about to put a denylist on the Claude Code child's env.
+The credential this ticket adds must NOT be on it — that is exactly the
+conflict FRI-2059's note about "the CLI needs its own Anthropic credentials"
+anticipates. Land them in either order, but test a real turn after both.
+
+DONE WHEN a turn completes end to end in the compose stack: send a message
+through the dashboard as the dev account and get a reply, with the worker
+spawning and exiting cleanly. Not "the binary is present" — the binary being
+present is the easy half.
+
 ### FRI-2014 — Cut the daily driver over to the container image
 
 `task` · parent FRI-2001 · ADR-050

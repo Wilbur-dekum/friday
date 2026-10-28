@@ -9,10 +9,11 @@
 // This test pins the contract that fix relies on — a daemon-scoped vault token
 // is invisible to loadFridayConfig() while locked, and visible after warming.
 
-import { chmodSync, existsSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateAgeKeypair } from "./secrets/age.js";
 import { AGE_KEY_PATH, SECRETS_DIR } from "./secrets/paths.js";
+import { ENV_LOCAL_PATH, ENV_PATH } from "./config.js";
 import { clearSecretsCache, initVault, upsertSecret } from "./secrets/vault.js";
 import { clearFridayConfigCache, loadFridayConfig, warmVaultCache } from "./env.js";
 
@@ -54,5 +55,48 @@ describe("loadFridayConfig + vault warm (FRI-166 regression)", () => {
     clearFridayConfigCache();
 
     expect(loadFridayConfig().cloudflareTunnelToken).toBe(TOKEN);
+  });
+});
+
+describe("integration secrets fall back to ~/.friday/.env (FRI-2060)", () => {
+  // The trap this closes: a key written into ~/.friday/.env was parsed out of
+  // the file and then dropped, because integration secrets alone skipped the
+  // file fallback every other secret has. No warning, no way to tell from the
+  // outside that the value was being ignored.
+  beforeEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    // localEnvPath() parses exactly ONE file, preferring .env.local — so to
+    // exercise the .env fallback at all, .env.local must be absent. Worth
+    // knowing in its own right: if a .env.local ever appears alongside a .env,
+    // the .env stops being read entirely and anything in it silently stops
+    // working.
+    if (existsSync(ENV_LOCAL_PATH)) rmSync(ENV_LOCAL_PATH, { force: true });
+    clearSecretsCache();
+    clearFridayConfigCache();
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    if (existsSync(ENV_PATH)) rmSync(ENV_PATH, { force: true });
+    clearSecretsCache();
+    clearFridayConfigCache();
+  });
+
+  it("reads an integration key from the env file when nothing else has it", () => {
+    writeFileSync(ENV_PATH, "ANTHROPIC_API_KEY=from-env-file\n");
+    clearFridayConfigCache();
+    expect(loadFridayConfig().anthropicApiKey).toBe("from-env-file");
+  });
+
+  it("still lets process.env win over the file", () => {
+    writeFileSync(ENV_PATH, "ANTHROPIC_API_KEY=from-env-file\n");
+    process.env.ANTHROPIC_API_KEY = "from-process-env";
+    clearFridayConfigCache();
+    expect(loadFridayConfig().anthropicApiKey).toBe("from-process-env");
+  });
+
+  it("returns undefined when the key is nowhere, rather than an empty string", () => {
+    clearFridayConfigCache();
+    expect(loadFridayConfig().anthropicApiKey).toBeUndefined();
   });
 });
