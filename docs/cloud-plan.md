@@ -7,10 +7,10 @@ rationale in [ADR-050 — ADR-054](decisions.md); the work itself, with the cons
 ticket must respect, in [cloud-tickets.md](cloud-tickets.md).
 
 **Three docs, three jobs** — keep them from drifting: ADRs own _why_ and what was
-rejected. [cloud-tickets.md](cloud-tickets.md) owns _the work_ — all 51 tickets
-(`FRI-2001`–`FRI-2051`), each carrying the constraint it has to respect, and it is the
-canonical record of the plan. This doc owns _epics, order, and what can run in parallel_.
-Nothing here restates a decision; it links to one.
+rejected. [cloud-tickets.md](cloud-tickets.md) owns _the work_ — every ticket, each
+carrying the constraint it has to respect, and it is the canonical record of the plan.
+This doc owns _epics, order, and what can run in parallel_. Nothing here restates a
+decision; it links to one.
 
 ## Strategy: dogfood first
 
@@ -115,6 +115,24 @@ architectural: canary cohorts, per-Deployment migration telemetry, synthetic hea
 (process liveness is insufficient — the worst failure leaves the page looking fine while
 live sync is dead), and expand/contract migration discipline becoming permanent.
 
+### E6 — Cleanup and backlog
+
+FRI-2068 · no fixed task range
+
+**Goal.** None, deliberately. This is the holding epic for work that is real but blocks
+no other epic.
+**Done when** never — it is a queue, not a milestone.
+**Depends on:** nothing · **Blocks:** nothing, by construction.
+
+It exists to keep E1–E5 honest. Each of those carries a done-when, and a chore parked
+inside one misreports how close that epic is to meeting it. **Admission rule:** a ticket
+belongs here when no task in E1–E5 can be blocked by it. Merely being low priority is not
+enough — priority and blocking are different axes, and only blocking decides placement.
+
+Members are chores, isolated bugs, evaluations, and developer-experience work: image size,
+CI flake, a migration-tooling evaluation, a stale auth cache, sync diagnosability, a
+second side-by-side Deployment for testing, and an unbounded worker-retry loop.
+
 ## Order and parallelism
 
 ```
@@ -122,13 +140,18 @@ E1 ──┬── acting-User task ──┬── E2 ──┐
      │                      └── E3 ──┤
      ├── E4 ─────────────────────────┤
      └── E5 (independent, any time) ─┘
+
+E6 ───── unordered; pick up in slack, blocks nothing
 ```
 
-- **E1 is the only hard gate.** Nothing is verifiable on the supported target before it.
+- **E1's gate is cleared.** The daily driver runs the container image, so there is a
+  supported Linux target to verify against. E1 retains open tickets — the gate was the
+  cutover, not the epic.
 - **The acting-User task is the only cross-epic chokepoint.** Sequence it first inside E2;
   E2 and E3 then run in parallel.
 - **E4 parallelizes with E2/E3** — it shares only E1.
 - **E5 parallelizes with everything** and is the natural second-person workstream.
+- **E6 is outside the ordering entirely.** Nothing waits on it; it waits on nothing.
 
 ## Sequencing risks
 
