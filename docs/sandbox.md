@@ -6,6 +6,11 @@ worker from destroying the host or escaping its workspace. This doc
 captures what shipped, what was deliberately deferred, and the residual
 risks the adversarial review surfaced.
 
+> **Read "Linux and containers" below first.** M1–M5 were designed for a
+> macOS laptop. The supported target is now a Linux container, where M2 does
+> not exist and the container itself is the isolation boundary (FRI-2062).
+> The M1–M5 sections below describe the macOS design as built.
+
 The original design grill is preserved in session JSONL
 `~/.claude/projects/-Users-seth-Development-Seth-Friday-agent-friday/1b984648-98fe-4f9e-b13b-dfb02e9de42c.jsonl`
 (2026-05-13).
@@ -123,6 +128,64 @@ A separate timer-based watchdog in `services/daemon/src/agent/`:
   (`FRIDAY_TURN_STALL_MS` env override). `lastBlockStop` resets on
   every `block-stop` IPC; heartbeats deliberately do NOT count (a
   hung SDK still emits them but never lands a block).
+
+## Linux and containers — what actually applies (FRI-2062)
+
+M1–M5 were designed for a macOS laptop. The supported deployment target is now
+a Linux container (ADR-050), and the layers do not all survive the move.
+Measured in the compose stack:
+
+| Layer                        | In a container                                                  |
+| ---------------------------- | --------------------------------------------------------------- |
+| M1 PreToolUse rules          | **Active.** Pure JS, no platform gate.                          |
+| M2 sandbox-exec SBPL         | **Gone.** `/usr/bin/sandbox-exec` is macOS-only.                |
+| M3 Lifecycle-script env      | Active.                                                         |
+| M4 Process-group containment | Active — `detached: true` + `kill(-pgid)` are POSIX.            |
+| M5 rlimits + stall watchdog  | Active, and `ulimit -t`/`-n` are enforced rather than advisory. |
+
+Four of five hold. The loss is announced at boot, at `warn`:
+
+```
+daemon.sandbox-exec  enabled=false  reason=binary-not-found
+  note="builders NOT sandboxed; relying on M1 PreToolUse + M4 pgrp only"
+```
+
+**The decision (FRI-2062): the Deployment container is the isolation boundary.**
+This is E4's stated direction, not a concession — and the trade is better than
+it first looks. M2 only ever denied `file-write*`; `file-read*` was always
+allowed, so a builder on the laptop could already read the vault and
+`.age-key`. M2 bought integrity, never confidentiality. A container, meanwhile,
+protects the host far more completely than any SBPL profile did: no access to
+the operator's real `~/.ssh`, no host filesystem, and nothing persists across a
+rebuild except the declared volumes.
+
+**What that boundary requires, and what broke it.** A boundary only holds if
+nothing inside it holds credentials reaching outside. `docker-compose.yml` set
+`FRIDAY_ADMIN_DATABASE_URL` — a Postgres **superuser** — on the long-running
+service, and the daemon spawns workers with `...process.env`, so every builder
+inherited it. On the shared cluster ADR-051 plans, one superuser reaches every
+Organization's database. That defeated FRI-2005's explicit decision ("the
+Deployment's own role stays non-superuser and scoped to its database") from a
+direction FRI-2005 did not cover.
+
+Fixed: the variable is no longer set on the service, and
+`probePostgresHealth()` — the supervisor preflight that was the last runtime
+consumer — now runs its three read-only probes as the application role
+(`pg_roles` and `pg_database` are world-readable; `SHOW wal_level` is visible
+to any role). Provisioning and `friday restore` take the credential
+per-invocation instead.
+
+**Accepted residual risk, until FRI-2038.** Inside the container a builder can
+still write anywhere under `$FRIDAY_DATA_DIR` — the vault, `.env`, memory
+entries, other agents' worktrees — and read the secrets there. One Deployment
+serves one Organization, so that is the tenant's own data, most of which the
+agent can reach through its tools anyway; the cross-tenant seam is the
+container, and that holds. Per-task builder containers (FRI-2038) are the fix
+for intra-Deployment isolation, and egress deny-by-default (FRI-2039) for the
+network, which is currently unrestricted.
+
+The full rewrite of this document around cgroups and container lifetime is
+FRI-2043. This section is the interim honest account, not that rewrite.
 
 ## Adversarial review — residual risk
 

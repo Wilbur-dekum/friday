@@ -830,24 +830,37 @@ export async function probePostgresHealth(opts?: { migrationsDir?: string }): Pr
     return result;
   }
 
+  // FRI-2062: these three probes run as the APPLICATION role, not a superuser.
+  //
+  // They used an admin connection, which made the supervisor's boot preflight
+  // the last thing requiring `FRIDAY_ADMIN_DATABASE_URL` at runtime — and
+  // because the daemon spawns workers with `...process.env`, a superuser URL
+  // present for the preflight is inherited by every builder, i.e. by the
+  // process running untrusted repository code. On the shared cluster ADR-051
+  // plans, that one credential reaches every Organization's database, which
+  // defeats the container boundary FRI-2062 accepts as the isolation seam.
+  //
+  // No superuser is needed: `pg_roles` and `pg_database` are world-readable
+  // catalogs, and `SHOW wal_level` is a server-wide setting visible to any
+  // role (as the original comment here already noted). Verified against the
+  // `friday` role directly. Reuses the connection proven reachable above.
   try {
-    const admin = new Client({ connectionString: adminConnectionUrl() });
-    await admin.connect();
+    const probe = new Client({ connectionString: resolveFridayDbUrl() });
+    await probe.connect();
     try {
-      const role = await admin.query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [FRIDAY_ROLE]);
+      const role = await probe.query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [FRIDAY_ROLE]);
       result.roleExists = role.rows.length > 0;
-      const db = await admin.query(`SELECT 1 FROM pg_database WHERE datname = $1`, [FRIDAY_DB]);
+      const db = await probe.query(`SELECT 1 FROM pg_database WHERE datname = $1`, [FRIDAY_DB]);
       result.databaseExists = db.rows.length > 0;
-      // wal_level is a server-wide setting visible to any role.
-      const wal = await admin.query<{ wal_level: string }>(`SHOW wal_level`);
+      const wal = await probe.query<{ wal_level: string }>(`SHOW wal_level`);
       const lvl = wal.rows[0]?.wal_level ?? null;
       result.walLevelActual = lvl;
       result.walLevelLogical = lvl === "logical";
     } finally {
-      await admin.end();
+      await probe.end();
     }
   } catch {
-    // Admin probe failed; leave the role/db/wal_level booleans false.
+    // Probe failed; leave the role/db/wal_level booleans false.
   }
 
   // FRI-150 (pivot, ADR-037): process.env.DATABASE_URL is the test
