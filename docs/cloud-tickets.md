@@ -21,11 +21,19 @@ order, and what runs in parallel_ — read that first for the shape. This file
 owns _the work_, one entry per ticket. Vocabulary is in
 [CONTEXT.md](../CONTEXT.md).
 
-**Working channel.** Claude Code remains the primary channel for now. The
-expectation is to switch to the `friday` CLI (and Friday itself) during or
-shortly after E1 — which is the point of the dogfood gate: once the daily driver
-runs the cloud image, these tickets are being worked by the system they
-describe.
+**Working channel.** Claude Code remains the primary channel. The original
+expectation was to switch to Friday itself during or shortly after E1; the
+cutover showed that is further out than it looked. Friday in the Deployment
+container cannot do development work at all — no repo mirrors, no `.git`, no
+`gh`, no git identity, no credentials — and giving it those is explicitly the
+wrong move (FRI-2071). Workers are processes, so Friday cannot spawn a
+toolchain container either until FRI-2037 makes the worker boundary a container
+lifecycle and FRI-2038 lands per-task builders.
+
+What works today is the split: **Friday coordinates** — it owns these tickets,
+the planning and the memory — while edits happen in Claude Code or the
+development container (FRI-2071). The dogfood gate did what it was for; it just
+bought parity of _runtime_, not of _toolchain_.
 
 Parents are named per ticket rather than written as `ticket_relations` rows —
 there is no service or CLI helper that writes that table (see the watch list).
@@ -850,6 +858,41 @@ Accepted residual risk until FRI-2038: inside the container a builder can write
 anywhere under `$FRIDAY_DATA_DIR` and read the secrets there. One Deployment
 serves one Organization, so that is the tenant's own data and the cross-tenant
 seam — the container — holds.
+
+### FRI-2071 — Development container type
+
+`task` · parent FRI-2036 · ADR-050, ADR-054
+
+A second container type for work that needs a git toolchain, kept out of the
+image a Deployment runs. Friday in the Deployment cannot do development work at
+all: no `/data/repos` mirrors, no `/data/workspaces`, `/app` has source but no
+`.git`, no `gh`, no `~/.ssh`, no SSH agent, no git identity, and the vault holds
+only `CLOUDFLARE_TUNNEL_TOKEN`.
+
+The wrong fix is adding the toolchain to the Deployment image — a Deployment has
+no business holding git credentials, which is the same reasoning that removed a
+cluster superuser from it in FRI-2062.
+
+Shape: a `dev` stage, `FROM runtime` plus `gh`, so the Deployment image is a
+literal PREFIX of the dev image and the two cannot drift. Behind a compose
+profile. Repo bind-mounted at `/workspace`, with an anonymous volume masking
+`node_modules` so the host's darwin native addons never leak into a linux
+container. Credentials are pass-through nulls, supplied per invocation.
+
+Constraint to respect: `dev` must be the last stage (it is `FROM runtime`), and
+**Docker's default target is the last stage**. Adding it silently rebuilt the
+Deployment as the dev image — `gh` present, `FRIDAY_DEV_CONTAINER=1`, on the
+service customers run. The `friday` service pins `target: runtime`; any new
+build site must name its target.
+
+It deliberately does NOT let Friday develop — workers are processes, so Friday
+cannot spawn it until FRI-2037 makes the worker boundary a container lifecycle.
+It is the proving ground for FRI-2038.
+
+Rejected: running the daily driver on the dev image. That would let builder
+processes inherit the toolchain today, and would end ADR-050's one-image
+invariant as a self-enforcing property — the invariant holds precisely because
+the daily driver runs the shipped artifact.
 
 ---
 
