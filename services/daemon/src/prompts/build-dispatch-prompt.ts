@@ -24,7 +24,7 @@
  * stays under `hooks/` (skill concern, not prompt concern).
  */
 
-import { runHooks, type SkillMatch } from "@friday/shared";
+import { runHooks, type ActingUser, type SkillMatch } from "@friday/shared";
 import { buildSystemPrompt, type PromptAgentRow } from "./build-system-prompt.js";
 import type { DispatchIntent } from "./intent.js";
 
@@ -109,14 +109,27 @@ export function resolveIntent(intent: DispatchIntent): ResolvedIntent {
   }
 }
 
+/**
+ * FRI-2016: `actingUser` is the User this turn runs on behalf of, threaded
+ * through to prompt assembly so Friday can address whoever is speaking
+ * (ADR-052) and tools can stamp the actor (ADR-053). Absent for every
+ * non-human trigger — schedules, mail, `agent_spawn`.
+ *
+ * Note the `agent_spawn` branch below: a spawn override supplies its own base
+ * system prompt, so the acting-User block does NOT appear there. That is
+ * correct — a spawned Builder is working on behalf of its parent agent, not
+ * conversing with a person — but it means "the prompt always names the User"
+ * is NOT an invariant. Do not write downstream code that assumes it.
+ */
 export async function buildDispatchPrompt(
   agentRow: PromptAgentRow,
   intent: DispatchIntent,
+  actingUser?: ActingUser,
 ): Promise<BuiltDispatchPrompt> {
   const baseSystemPrompt =
     intent.kind === "agent_spawn" && intent.baseSystemPromptOverride !== undefined
       ? intent.baseSystemPromptOverride
-      : (await buildSystemPrompt(agentRow)).systemPrompt;
+      : (await buildSystemPrompt(agentRow, actingUser)).systemPrompt;
 
   const resolved = resolveIntent(intent);
 

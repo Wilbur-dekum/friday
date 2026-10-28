@@ -139,6 +139,46 @@ export function renderIdentityBlock(identity: AgentIdentity): string {
 }
 
 /**
+ * The **User** on whose behalf this turn is running (FRI-2016, ADR-052/053).
+ *
+ * `undefined` is a real and permanent case, not a gap to be filled later: a
+ * scheduled run, a mail-triggered turn and an `agent_spawn` have no human
+ * behind them. Code downstream must treat "no acting User" as normal rather
+ * than as missing data — including ADR-053's role gate, where absent means
+ * "not a User action" and not "allow".
+ */
+export interface ActingUser {
+  id: string;
+  /** Both NOT NULL on the `user` table, so neither is optional here. */
+  name: string;
+  email: string;
+}
+
+/**
+ * Tell the agent who is speaking.
+ *
+ * ADR-052 wants Friday to address whoever is actually talking rather than a
+ * generic "the user" — which matters the moment an Organization has more than
+ * one member, and matters again per-Transport, where the same person arrives
+ * over Slack and the web dashboard.
+ *
+ * The id is included deliberately. It is what tools stamp for the audit and
+ * erasure obligations in ADR-053, so the agent must be able to name it without
+ * inferring it from an email address.
+ */
+export function renderActingUserBlock(user: ActingUser): string {
+  return [
+    "# Who you are speaking with",
+    "",
+    `- Name: ${user.name}`,
+    `- Email: ${user.email}`,
+    `- User id: \`${user.id}\` — use this verbatim when a tool asks which User acted.`,
+    "",
+    "Address this person directly. Do not assume they are the only User, and do not attribute their requests, preferences or history to anyone else.",
+  ].join("\n");
+}
+
+/**
  * Compose the system prompt in the canonical order:
  *   1. CONSTITUTION
  *   2. SOUL
@@ -157,12 +197,20 @@ export function composeSystemPrompt(
   stack: PromptStack,
   identity?: AgentIdentity,
   pinnedFacts?: string,
+  actingUser?: ActingUser,
 ): string {
   const identityBlock = identity ? renderIdentityBlock(identity) : "";
+  // Immediately after the agent's own identity: "who I am" then "who I am
+  // talking to" reads as one unit, and both precede the pinned facts and the
+  // agent-type instructions that may refer to either. Absent when there is no
+  // acting User, rather than rendered as "unknown" — a turn with no human
+  // behind it is a normal turn, not a degraded one.
+  const actingUserBlock = actingUser ? renderActingUserBlock(actingUser) : "";
   return [
     stack.constitution,
     stack.soul,
     identityBlock,
+    actingUserBlock,
     pinnedFacts ?? "",
     stack.agentBase,
     stack.protocols,

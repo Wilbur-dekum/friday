@@ -42,6 +42,7 @@ import {
   resolveModelForRole,
   schema,
 } from "@friday/shared";
+import { resolveActingUser } from "@friday/shared/services";
 import { getBlockById } from "@friday/shared/services";
 import * as registry from "./registry.js";
 import { dispatchTurn, peekLiveWorker } from "./lifecycle.js";
@@ -113,11 +114,21 @@ async function processPendingBlockRow(id: string): Promise<void> {
     body: wrappedPrompt,
     systemPrompt: dispatchSystemPrompt,
     allowedToolsOverride,
-  } = await buildDispatchPrompt(agentRow, {
-    kind: "user_chat",
-    userText: promptText,
-    skillMatch: skillMatch ?? undefined,
-  });
+  } = await buildDispatchPrompt(
+    agentRow,
+    {
+      kind: "user_chat",
+      userText: promptText,
+      skillMatch: skillMatch ?? undefined,
+    },
+    // FRI-2016: the acting User. `row.userId` is stamped by the
+    // `sendUserMessage` mutator from the JWT zero-cache verified, so it is a
+    // trusted identity rather than anything the client chose — the same id
+    // already used for the PostHog attribution below. Resolves to null for a
+    // turn with no human behind it, which prompt assembly renders as no
+    // acting-User block at all.
+    (await resolveActingUser(row.userId)) ?? undefined,
+  );
 
   // Decide queued-vs-immediate using the live-worker peek. Mirrors
   // the legacy REST path's `willQueue` decision.
