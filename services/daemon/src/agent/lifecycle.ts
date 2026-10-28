@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentType } from "@friday/shared";
-import { getDb, loadConfig, schema } from "@friday/shared";
+import { getDb, loadConfig, loadFridayConfig, schema } from "@friday/shared";
 import {
   claimPendingSession,
   getTurnAuthorUserId,
@@ -432,6 +432,32 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // Anthropic credentials to function. See FRI-2059.
   const env = {
     ...process.env,
+    // FRI-2014: bridge the resolved Anthropic credential into the worker.
+    //
+    // The daemon's own env is deliberately clean of secrets (above), and the
+    // SDK reads `ANTHROPIC_API_KEY` from the environment it inherits. On a
+    // laptop that works by accident: the key is exported in the user's shell
+    // and launchd passes it through. In a Deployment it is NOT in the
+    // environment — it lives in the age vault or `$FRIDAY_DATA_DIR/.env`, both
+    // of which `loadFridayConfig()` resolves and neither of which anything
+    // ever put back into `process.env`.
+    //
+    // The failure is loud in the logs but silent in its shape: the worker
+    // spawns fine, the SDK reports `Not logged in · Please run /login`, the
+    // daemon persists that as an assistant block and the wedge detector
+    // restarts the worker — about 2.6 blocks/sec of junk written into the
+    // Deployment's own database, forever.
+    //
+    // Only fills a GAP: an explicit `ANTHROPIC_API_KEY` in the environment
+    // still wins, so nothing about the laptop path changes. Precedence inside
+    // `loadFridayConfig` is vault > `.env` (ADR-051's Capacity source: `byo`
+    // then the system fallback) — see FRI-2048, which has to revisit that
+    // ordering for real tenants.
+    ...(process.env.ANTHROPIC_API_KEY
+      ? {}
+      : loadFridayConfig().anthropicApiKey
+        ? { ANTHROPIC_API_KEY: loadFridayConfig().anthropicApiKey as string }
+        : {}),
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
     CI: "1",
   };

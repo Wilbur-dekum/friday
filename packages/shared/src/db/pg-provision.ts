@@ -343,7 +343,7 @@ function resolveFridayDbUrl(): string {
  * must never hold one. Until then it is at least configurable rather than
  * assumed.
  */
-function resolveAdminUrl(database: string): string {
+export function resolveAdminUrl(database: string): string {
   const configured = process.env.FRIDAY_ADMIN_DATABASE_URL;
   if (!configured) return localHomebrewUrl(database);
   try {

@@ -115,6 +115,19 @@ services:
       # (one superuser reaches every database on a shared cluster) — FRI-2005.
       FRIDAY_ADMIN_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
       FRIDAY_DATA_DIR: /data
+      # FRI-2014: the migrated `.env` carries the SOURCE machine's absolute
+      # path here (`/Users/<someone>/.friday/zero/replica.db`), which does not
+      # exist in a Deployment. zero-cache then exits with "Cannot open
+      # ZERO_REPLICA_FILE", and because it is a supervised child the whole
+      # stack goes down with it — a cutover failure that only appears AFTER a
+      # restore, never on a fresh container.
+      #
+      # `loadFridayConfig` resolves machine-local keys as
+      # `process.env[key] || parsed[key]`, so setting it here outranks the
+      # bundle. Same shape as the DATABASE_URL precedence FRI-2013 added; any
+      # other absolute host path in a migrated `.env` has the same hazard.
+      # The replica is a cache, never canonical — it re-COPYs from Postgres.
+      ZERO_REPLICA_FILE: /data/zero/replica.db
       # FRI-2060: agent credentials. Headless by necessity — the CLI's
       # subscription OAuth needs an interactive login and a persisted
       # credential dir, which an unattended Deployment cannot do. An API key
@@ -122,7 +135,16 @@ services:
       # (`friday` = our org key, `byo` = the customer's), so dev and cloud
       # authenticate the same way. Unset here: export it in your shell, or put
       # it in the vault as ANTHROPIC_API_KEY.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      #
+      # NULL value, not `${ANTHROPIC_API_KEY:-}`. The `:-` form sets the
+      # variable to the EMPTY STRING when the host shell has not exported it,
+      # and an empty string is not nullish — it shadows the key in
+      # `$FRIDAY_DATA_DIR/.env` instead of falling back to it. The symptom is
+      # not a missing-credential error at boot: the worker spawns, the SDK
+      # reports `Not logged in · Please run /login`, and the daemon rewrites
+      # that as an assistant block and retries forever. A null value is
+      # resolved from the host environment and left UNSET when absent.
+      ANTHROPIC_API_KEY:
       # FRI-2011: the public origin the browser actually uses. BetterAuth
       # generates cookies and redirects against this, and asserts it is a
       # trusted origin — so a mismatch fails loudly here instead of silently

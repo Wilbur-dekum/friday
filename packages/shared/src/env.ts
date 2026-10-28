@@ -53,6 +53,24 @@ function localEnvPath(): string {
   return ENV_LOCAL_PATH;
 }
 
+/**
+ * Read BOTH env files, `.env` as the base and `.env.local` overlaying it.
+ *
+ * FRI-2014: this used to read only `localEnvPath()`, which is `.env.local`
+ * when that file exists and `.env` otherwise — an either/or, not a layering.
+ * That is invisible on a laptop, where `.env.local` usually does not exist and
+ * `.env` is therefore read. It breaks on migration: `friday restore` WRITES
+ * `.env.local` (to persist the synced `friday` role password), which flips the
+ * choice to `.env.local` and silently orphans every key the operator had in
+ * `.env` — ANTHROPIC_API_KEY, LINEAR_API_KEY, the Slack tokens, PostHog.
+ *
+ * The symptom is not a missing-config error. The Deployment boots healthy and
+ * the agent answers every turn with `Not logged in · Please run /login`.
+ *
+ * `.env.local` still wins on conflict, which is what it is for (machine-local
+ * overrides) and is exactly the behaviour when both files already existed.
+ * Keys present only in `.env` simply stop being dropped.
+ */
 function ensureLocalEnvFile(): Record<string, string> {
   const path = localEnvPath();
   if (!existsSync(dirname(path))) {
@@ -61,7 +79,9 @@ function ensureLocalEnvFile(): Record<string, string> {
   if (!existsSync(path)) {
     writeFileSync(path, "# Friday machine-local env vars\n");
   }
-  return dotenvParse(readFileSync(path));
+  const base = existsSync(ENV_PATH) ? dotenvParse(readFileSync(ENV_PATH)) : {};
+  const local = existsSync(ENV_LOCAL_PATH) ? dotenvParse(readFileSync(ENV_LOCAL_PATH)) : {};
+  return { ...base, ...local };
 }
 
 /**
