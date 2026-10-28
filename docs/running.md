@@ -154,6 +154,7 @@ friday stop                                    # and confirm it is actually quie
 friday backup --full --include-age-key         # BOTH flags — see below
 docker compose up -d postgres                  # initdb creates the role + vector
 docker compose run --rm -v "$BUNDLE:/bundle.tar.gz:ro" \
+  -e FRIDAY_ADMIN_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/postgres \
   --entrypoint node friday packages/cli/dist/index.js restore /bundle.tar.gz --yes
 # compare the census HERE, before anything starts
 docker compose up -d
@@ -163,6 +164,8 @@ friday disable                                 # stop the host job reclaiming po
 **`--full --include-age-key`, not either alone.** The default bundle is _selective_: it carries the curated `BACKUP_PATHS` and nothing else. `--include-age-key` puts `.age-key` in the tarball but selective restore never places it, and `.env` is not in the list at all — so a selective bundle silently arrives without the age identity (the vault cannot be decrypted) and without any key the operator kept in `.env`.
 
 **Restore in a one-off container**, not the running one. `docker compose run --rm` gives you the same volumes and environment with no daemon writing underneath the restore.
+
+**`FRIDAY_ADMIN_DATABASE_URL` is passed per-invocation, not set on the service.** Restore needs a superuser to `DROP`/`CREATE DATABASE` and clean up replication slots. The long-running `friday` service deliberately does not carry it, because the daemon spawns workers with `...process.env` and would hand a cluster superuser to every builder — see `docs/sandbox.md` § "Linux and containers" (FRI-2062).
 
 **Compare the census before you start the stack.** Once the daemon is up it does real work — a mail sweep, an overdue schedule — and the counts legitimately diverge within seconds. Comparing afterwards cannot distinguish that from data loss.
 

@@ -110,10 +110,30 @@ services:
       # zero-cache replicates from the same database (ADR-024 keeps these in
       # sync; provisioning normally writes both).
       ZERO_UPSTREAM_DB: postgresql://friday:friday@postgres:5432/friday
-      # Superuser connection for the operations the `friday` role cannot do.
-      # In the cloud this belongs to provisioning and never to a Deployment
-      # (one superuser reaches every database on a shared cluster) — FRI-2005.
-      FRIDAY_ADMIN_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      # FRIDAY_ADMIN_DATABASE_URL is deliberately NOT set here (FRI-2062).
+      #
+      # It is a SUPERUSER connection, and on the shared cluster ADR-051 plans
+      # one superuser reaches every Organization's database. The daemon spawns
+      # workers with `...process.env`, so anything set on this long-running
+      # service is inherited by every builder — i.e. by the process that runs
+      # untrusted repository code. That makes the Deployment container, which
+      # FRI-2062 accepts as the isolation boundary, hold a credential reaching
+      # straight past it.
+      #
+      # Nothing at runtime needs it: FRI-2005 moved `CREATE EXTENSION vector`
+      # to provisioning, and the boot check (`hasVectorExtension`) is a
+      # read-only `SELECT 1 FROM pg_extension` that runs as the application
+      # role precisely so no superuser is required on the boot path.
+      #
+      # The one-off commands that DO need it — `friday restore`, provisioning —
+      # take it per-invocation instead:
+      #
+      #   docker compose run --rm \
+      #     -e FRIDAY_ADMIN_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/postgres \
+      #     --entrypoint node friday packages/cli/dist/index.js restore <bundle>
+      #
+      # The previous comment here stated this rule and then set the variable
+      # anyway; see docs/sandbox.md § "Linux and containers".
       FRIDAY_DATA_DIR: /data
       # FRI-2014: the migrated `.env` carries the SOURCE machine's absolute
       # path here (`/Users/<someone>/.friday/zero/replica.db`), which does not

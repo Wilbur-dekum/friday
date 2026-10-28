@@ -796,6 +796,14 @@ targets macOS surfaces with no Linux analog (`~/Library/Keychains`, `launchctl`,
 semantics. Containment becomes cgroups plus container lifetime; the doc needs
 rewriting around that rather than patching.
 
+FRI-2062 settled the decision this implements and wrote an interim "Linux and
+containers" section into `docs/sandbox.md` — the per-layer table, the boundary
+decision, and the accepted residual risk. Scope here narrows to the rewrite:
+restructure the document around the container model instead of leaving M1–M5 as
+the primary narrative with a correction bolted in front, and fold in whatever
+FRI-2038/2039 land. Do not re-litigate the decision. Note M5 is NOT retired on
+Linux — its `ulimit`s are enforced there, unlike on Darwin.
+
 ### FRI-2059 — Scrub the Claude Code child's env — the real untrusted-code boundary
 
 `task` · parent FRI-2036 · ADR-054
@@ -814,19 +822,34 @@ ADR-054's boundary, and E1 only ever pulled control 1 forward.
 `bug` · parent FRI-2036 · ADR-054
 
 Every worker fork in the compose stack logs
-`"sandboxed":false,"sandboxReason":"binary-not-found"`. `docs/sandbox.md`
-describes isolation as M1–M5 built on `sandbox-exec`, which is macOS-only and
-absent from the Linux image — so the sandbox degrades **fail-open**, and the
-only signal is one field on a per-fork log line.
+`"sandboxed":false,"sandboxReason":"binary-not-found"` — `sandbox-exec` is
+macOS-only and absent from the Linux image.
 
-This inverts E4's premise: the plan says "the container is the sandbox", but
-today the container is LESS isolated than the Mac was. Decide and implement
-either a Linux equivalent (seccomp/landlock, bubblewrap, container-per-worker)
-or an explicit decision that the Deployment boundary IS the sandbox, with the
-residual risk written into `docs/sandbox.md`.
+**Settled: the Deployment container is the isolation boundary**, which is E4's
+stated direction rather than a concession. Investigating it corrected most of
+this ticket's own framing. The loss is NOT silent — the daemon announces it at
+boot at `warn`. Only M2 is lost, not "the sandbox": M1 is pure JS, M3 is
+unchanged, M4's `detached` + `kill(-pgid)` are POSIX, and M5's `ulimit`s are
+enforced on Linux rather than advisory. And M2 denied `file-write*` only, so a
+builder could always read the vault — it bought integrity, never
+confidentiality.
 
-Either way the fail-open must get loud: a startup warning when the configured
-sandbox is unavailable. Silent degradation of a security control is the defect.
+**The real hole was not M2.** A boundary holds only if nothing inside it holds
+credentials reaching outside it. Compose set `FRIDAY_ADMIN_DATABASE_URL` — a
+Postgres superuser — on the long-running service, and the daemon spawns workers
+with `...process.env`, so every builder inherited a credential that reaches
+every Organization's database on the shared cluster ADR-051 plans. That defeated
+FRI-2005 from a direction it did not cover.
+
+Fixed: the variable is passed per-invocation to provisioning and `friday
+restore` instead, and `probePostgresHealth()` — the last runtime consumer — now
+probes as the application role (`pg_roles`/`pg_database` are world-readable,
+`SHOW wal_level` is visible to any role).
+
+Accepted residual risk until FRI-2038: inside the container a builder can write
+anywhere under `$FRIDAY_DATA_DIR` and read the secrets there. One Deployment
+serves one Organization, so that is the tenant's own data and the cross-tenant
+seam — the container — holds.
 
 ---
 
