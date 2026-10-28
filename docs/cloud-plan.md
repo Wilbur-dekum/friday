@@ -12,6 +12,40 @@ carrying the constraint it has to respect, and it is the canonical record of the
 This doc owns _epics, order, and what can run in parallel_. Nothing here restates a
 decision; it links to one.
 
+## Where we are
+
+_Snapshot as of 2026-10-28. Update it when an epic's state changes — a stale status
+section is worse than none._
+
+**E1's gate is cleared.** The daily driver runs the container image against external
+Postgres, behind Caddy at `http://friday.localhost`, with the host `launchd` job disabled
+(`friday disable`) so it cannot reclaim port 7615. The cutover was verified by row census
+across all 16 `CENSUS_TABLES` **before** starting the stack — the comparison is only
+meaningful there, because the daemon does real work within seconds of boot.
+
+That cutover is also what produced most of the open tickets below: the documented
+procedure did not work, and four defects had to be fixed to complete it (FRI-2014).
+
+**Next: FRI-2016**, thread the acting User through the turn. It is the only cross-epic
+chokepoint — one change serving ADR-052's prompt identity, ADR-053's role gate and the
+audit stamp — and it unblocks E2 and E3 together.
+
+**Worth doing early, though neither blocks anything:** FRI-2066 and FRI-2065 are the same
+defect by two routes — a worker that cannot succeed retries with no ceiling, writing
+unbounded rows into the tenant's own database. Cheap now; under E5's **Usage cap** it
+becomes a billing event.
+
+**Live risk, not yet scheduled:** FRI-2062. Worker sandboxing is silently off in the
+container and fails open, so today the Deployment is _less_ isolated than the laptop was.
+That inverts E4's premise and is the thing to settle before Friday runs unattended
+development work on its own install.
+
+**Open judgement calls** — placements that could reasonably go the other way, recorded so
+they can be revisited rather than rediscovered: FRI-2065 stays on E1 (not E6) because
+FRI-2050's export inherits its backup-fidelity gap; FRI-2056 sits on E5 because FRI-2049
+cannot be tested without a release pipeline; FRI-2059 and FRI-2062 moved from E1 to E4 as
+ADR-054's real boundary.
+
 ## Strategy: dogfood first
 
 E1 exists so the daily driver runs the cloud image. That makes [ADR-050](decisions.md)'s
