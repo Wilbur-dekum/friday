@@ -50,6 +50,7 @@ export {
   hasVectorExtension,
   findPgBin,
   findPgIsReady,
+  resolveAdminUrl,
   FRIDAY_PG_CONSTANTS,
   type PgHealth,
   type ProvisionResult,

@@ -39,6 +39,7 @@ import {
   getPool,
   loadConfig,
   loadFridayConfig,
+  resolveAdminUrl,
   runMigrations,
   sessionFilePath,
   sessionSidecarDir,
@@ -489,9 +490,24 @@ async function restorePgDumpBundle(
     );
   }
   console.log(pc.dim("  pg_restore…"));
+  // `--no-comments` (FRI-2014): the dump carries exactly one COMMENT — the
+  // `COMMENT ON EXTENSION vector` that pg_dump emits alongside the extension —
+  // and restoring it fails with `must be owner of extension vector`. We
+  // deliberately pg_restore as `friday` (see above) while the extension is
+  // created by a SUPERUSER, because `CREATE EXTENSION` is not a privilege the
+  // Deployment's role holds (ADR-044). Those two facts cannot both hold AND
+  // let `friday` comment on the extension — PostgreSQL has no
+  // `ALTER EXTENSION ... OWNER TO` to reconcile them.
+  //
+  // pg_restore exits non-zero for that single ignored error, which aborted the
+  // whole restore inside a Deployment. Dropping comments is lossless for this
+  // schema: Drizzle emits none, and `pg_restore -l` on a real bundle lists the
+  // extension comment as the only COMMENT entry. If the schema ever gains
+  // meaningful comments, switch to `pg_dump --exclude-extension=vector` at the
+  // backup side (PG17+) rather than widening what is ignored here.
   const pgRestore = spawnSync(
     findPgBin("pg_restore"),
-    ["--no-owner", "--no-privileges", "-d", dbUrl, dumpPath],
+    ["--no-owner", "--no-privileges", "--no-comments", "-d", dbUrl, dumpPath],
     { stdio: ["ignore", "inherit", "inherit"] },
   );
   if (pgRestore.status !== 0) {
@@ -714,11 +730,42 @@ function checkDatabaseHasUsers(): boolean {
   return Number.isFinite(n) && n > 0;
 }
 
+/**
+ * What to hand `psql -d` for the superuser admin steps (FRI-2014).
+ *
+ * Separated out so the fallback is testable without a Postgres: the whole
+ * point is that the no-env case must stay the bare database name, i.e. a
+ * Unix-socket connection, and not `resolveAdminUrl`'s TCP fallback. Reads
+ * `process.env` directly because `resolveAdminUrl` does too — one source of
+ * truth beats a parameter the delegate would ignore.
+ */
+export function resolveAdminPsqlTarget(): string {
+  return process.env.FRIDAY_ADMIN_DATABASE_URL ? resolveAdminUrl("postgres") : "postgres";
+}
+
 function runPsqlAdmin(extraArgs: string[]): void {
   // Connect to the default `postgres` database so we can DROP friday
-  // while no one else is connected. Local Postgres trust auth means we
-  // don't need credentials here.
-  const res = spawnSync(findPgBin("psql"), ["-d", "postgres", ...extraArgs], {
+  // while no one else is connected.
+  //
+  // On a laptop this is local trust auth over the Unix socket and needs no
+  // credentials. In a Deployment there IS no local Postgres — the socket does
+  // not exist and every admin step here (DROP/CREATE DATABASE, the replication
+  // slot cleanup, the role-password sync) died with:
+  //
+  //   psql: error: connection to server on socket
+  //   "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
+  //
+  // which made `friday restore` unusable inside a container even though the
+  // image ships `postgresql-client-18`.
+  //
+  // Only an explicitly configured `FRIDAY_ADMIN_DATABASE_URL` overrides the
+  // socket. `resolveAdminUrl`'s own fallback is a TCP URL at
+  // `localhost:5432`, and substituting that here would NOT be equivalent to
+  // the socket: on a machine running any other Postgres on 5432 — a second
+  // project's container, say — it silently retargets the admin connection at
+  // the wrong server and drops the wrong database. Absent the env var this
+  // stays byte-for-byte the old `-d postgres` socket connection.
+  const res = spawnSync(findPgBin("psql"), ["-d", resolveAdminPsqlTarget(), ...extraArgs], {
     stdio: ["ignore", "inherit", "inherit"],
   });
   if (res.status !== 0) {

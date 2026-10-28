@@ -145,7 +145,38 @@ Then compare row counts on both sides. `CENSUS_TABLES` in `packages/shared/src/d
 
 A surplus counts as a mismatch too — a restore should reproduce the source exactly, and extra rows mean the target was not empty.
 
-**Restoring a full bundle inside a Deployment** (`friday restore`) works now that the image carries `postgresql-client-18`; bookworm's default client is 15 and refuses a pg18 server. Restore takes `DATABASE_URL` from the environment in preference to the bundle's, because the bundle carries the source machine's `localhost:5432` and a Deployment reaches its database as a sibling service.
+### Cutting a real install over (the whole-machine migration)
+
+Moving an existing Friday onto a Deployment is a superset of the database move above, and the database is the part that goes right on its own. Measured end to end on the first real cutover:
+
+```bash
+friday stop                                    # and confirm it is actually quiet
+friday backup --full --include-age-key         # BOTH flags — see below
+docker compose up -d postgres                  # initdb creates the role + vector
+docker compose run --rm -v "$BUNDLE:/bundle.tar.gz:ro" \
+  --entrypoint node friday packages/cli/dist/index.js restore /bundle.tar.gz --yes
+# compare the census HERE, before anything starts
+docker compose up -d
+friday disable                                 # stop the host job reclaiming port 7615
+```
+
+**`--full --include-age-key`, not either alone.** The default bundle is _selective_: it carries the curated `BACKUP_PATHS` and nothing else. `--include-age-key` puts `.age-key` in the tarball but selective restore never places it, and `.env` is not in the list at all — so a selective bundle silently arrives without the age identity (the vault cannot be decrypted) and without any key the operator kept in `.env`.
+
+**Restore in a one-off container**, not the running one. `docker compose run --rm` gives you the same volumes and environment with no daemon writing underneath the restore.
+
+**Compare the census before you start the stack.** Once the daemon is up it does real work — a mail sweep, an overdue schedule — and the counts legitimately diverge within seconds. Comparing afterwards cannot distinguish that from data loss.
+
+**Clear stale agent session pointers.** `agents.session_id` is restored, but the Claude SDK transcripts it points at live under `$HOME/.claude/projects/<encoded-cwd>/` and do not migrate — `friday backup` looks for them under the agent's working directory while the daemon actually ran them from the install dir, so the capture comes back empty. The SDK then cannot resume, produces zero content, and the wedge detector restarts the worker on a loop — about 2.6 error blocks per second written into the database you just migrated. Until that is fixed, reset them as part of the cutover:
+
+```sql
+UPDATE agents SET session_id = NULL, status = 'idle';
+```
+
+Chat history is unaffected (it lives in `blocks`); only in-SDK conversational context is lost.
+
+**Absolute host paths in the migrated `.env` are the general hazard.** `DATABASE_URL` is special-cased so the environment outranks the bundle, and compose now pins `ZERO_REPLICA_FILE` for the same reason — the bundle's value points at the source machine's home directory, and zero-cache exits on it, taking the supervised stack down with it. Anything else in `.env` holding an absolute path will behave the same way.
+
+**Restoring inside a Deployment** works now that the image carries `postgresql-client-18`; bookworm's default client is 15 and refuses a pg18 server. Restore takes `DATABASE_URL` from the environment in preference to the bundle's, because the bundle carries the source machine's `localhost:5432` and a Deployment reaches its database as a sibling service. The superuser steps (`DROP`/`CREATE DATABASE`, the replication-slot cleanup) use `FRIDAY_ADMIN_DATABASE_URL` when set and the local socket otherwise.
 
 ### Lifecycle in a container
 
