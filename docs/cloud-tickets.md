@@ -570,6 +570,28 @@ individual's erasure request goes to their employer.
 action to honour a controller instruction when it arrives. Depends on the
 acting-User stamp.
 
+### FRI-2070 — No account recovery path exists
+
+`task` · parent FRI-2015 · ADR-053
+
+After the FRI-2014 cutover the Deployment holds exactly one account, with a
+password set during `friday setup`. There is no way to change or reset it: no
+`friday` command touches passwords, nothing implements
+`forgetPassword`/`setPassword`, and the dashboard sets `disableSignUp: true`,
+so a second account cannot be created as a way around it. A forgotten password
+locks the owner out of their own install, data intact and unreachable.
+
+Arguably "use your password manager" for a single-user laptop. It stops being
+that in E2: once an admin adds and revokes Users (FRI-2018, FRI-2028), an admin
+must be able to reset a member and a member must recover without the admin
+holding their password. Same surface as ADR-053's revocation.
+
+Constraint to respect: any reset must go THROUGH BetterAuth so the hash format
+matches what the dashboard verifies — never hand-written SQL into
+`account.password`. Self-service recovery needs email delivery, which a
+Deployment does not have, so it may belong to the Control plane as identity
+provider (FRI-2046); settle that before building a per-Deployment mail path.
+
 ---
 
 ## FRI-2029 — E3: Transports
@@ -1079,3 +1101,39 @@ Wanted: treat the not-authenticated result as a terminal turn failure rather
 than content (it should never reach the user as a message), surface it as a
 Deployment health problem, and bound the wedge-restart loop generally so no
 failure mode can write unbounded rows into a tenant's database.
+
+### FRI-2069 — An orphaned daemon survives `friday stop`
+
+`bug` · parent FRI-2068 · ADR-028
+
+Found while quieting the source for the FRI-2014 cutover. `friday stop`
+reported success and `launchctl print` confirmed the job was gone, yet a daemon
+still held 127.0.0.1:7610:
+
+```
+PID   PPID   ELAPSED       COMMAND
+5601     1   20-01:53:54   node dist/index.js
+```
+
+Parented to PID 1, **elapsed 20 days**, and actively working — a worker child
+spawned 10 seconds earlier, 33 blocks written in the preceding 10 minutes.
+`friday status` had reported a _different_ daemon (pid 28252) under supervisor
+27657, so two daemons were running against the same Postgres. `kill -TERM`
+shut it down cleanly.
+
+Two daemons on one database is not a benign duplicate: both LISTEN on
+`friday_new_pending_block` and race to claim pending blocks, both run the
+scheduler so a cron schedule can fire twice, both run boot recovery. Past
+"mystery" symptoms — duplicate turns, blocks with no apparent trigger — are
+consistent with this and should be re-examined against it. It also silently
+defeats `friday stop` as the safety step the migration procedure depends on.
+
+Establish the mechanism before fixing. ADR-028's supervision rework exists to
+give cascade-stop via process groups, so this is a regression, a pre-rework
+process that outlived its supervisor, or a path that detaches from the group.
+Twenty days spans several `friday update` runs, which flip the `current`
+symlink and restart the stack — a strong hint.
+
+Then: `friday stop` should verify the port is free and the daemon actually
+gone rather than trusting `launchctl bootout`, and `friday status` should
+notice a daemon it does not own.
