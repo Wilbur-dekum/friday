@@ -22,6 +22,7 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
+import { killPgrp, killPgrpDescendants } from "./worker-runtime.js";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
@@ -115,13 +116,34 @@ describe("abortTurn kills in-flight tool subprocesses immediately", () => {
       // subprocess tree. `child.pid = shellPid` is critical so
       // `killPgrpDescendants` excludes the shell (worker stand-in) and only
       // signals the sleep child.
-      const worker = {
-        child: {
-          pid: shellPid,
-          send: vi.fn(),
-          exitCode: null,
-          killed: false,
+      // FRI-2037: a REAL handle, not `fakeWorkerHandle()`. This case is an
+      // integration test of the descendant kill — it spawns an actual shell
+      // with an actual `sleep` child and asserts the sleep dies while the
+      // shell survives. A fake handle would stub out the exact behaviour
+      // under test and the case would pass while proving nothing.
+      //
+      // `pid` is the shell for both roles: with `detached: true` a real
+      // worker leads its own group, so pgid === pid, and passing shellPid as
+      // the worker pid is what makes `killPgrpDescendants` exclude the shell
+      // and signal only the sleep child.
+      const sendSpy = vi.fn();
+      const handle = {
+        pid: shellPid,
+        send: sendSpy,
+        onMessage: () => {},
+        onceMessage: () => {},
+        onError: () => {},
+        onExit: () => {},
+        onceExit: () => {},
+        isAlive: () => Promise.resolve(true),
+        terminate: async (sig: "SIGTERM" | "SIGKILL") => {
+          killPgrp(shellPid, sig);
         },
+        terminateDescendants: async (sig: "SIGTERM" | "SIGKILL") =>
+          killPgrpDescendants(shellPid, shellPid, sig),
+      };
+      const worker = {
+        handle,
         pgid: shellPid,
         agentName: "abort-tool-kill-agent",
         agentType: "orchestrator",
@@ -147,8 +169,8 @@ describe("abortTurn kills in-flight tool subprocesses immediately", () => {
       expect(pidIsAlive(shellPid)).toBe(true);
 
       // Fire.
-      expect(abortTurn("abort-tool-kill-agent")).toBe(true);
-      expect(worker.child.send).toHaveBeenCalledWith({ type: "abort" });
+      expect(await abortTurn("abort-tool-kill-agent")).toBe(true);
+      expect(sendSpy).toHaveBeenCalledWith({ type: "abort" });
 
       // Poll until sleep is reaped. The whole point of the descendant-kill
       // is that destructive tools die within a human-imperceptible window —
@@ -171,6 +193,6 @@ describe("abortTurn kills in-flight tool subprocesses immediately", () => {
 
   it("is a no-op on agents that aren't live", async () => {
     const { abortTurn } = await import("./lifecycle.js");
-    expect(abortTurn("agent-that-does-not-exist")).toBe(false);
+    expect(await abortTurn("agent-that-does-not-exist")).toBe(false);
   });
 });
