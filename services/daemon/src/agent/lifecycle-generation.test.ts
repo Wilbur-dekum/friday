@@ -21,6 +21,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
@@ -54,11 +55,11 @@ interface FakeChild {
  *  paths driven below. `pgid: 0` makes killPgrp a no-op (no real SIGTERM). */
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: unknown;
-  child: FakeChild;
+  handle: FakeWorkerHandle;
 } {
-  const child: FakeChild = { send: vi.fn(), exitCode: null, killed: false };
+  const handle = fakeWorkerHandle();
   const w = {
-    child,
+    handle,
     pgid: 0,
     agentName: "gen-agent",
     agentType: "bare",
@@ -83,7 +84,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     noMailBackStreak: 0,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 describe("FRI-145 M2: Generation = object identity", () => {
@@ -226,13 +227,13 @@ describe("FRI-145 M2: Generation = object identity", () => {
       await registry.registerAgent({ name: NAME, type: "bare" });
       await registry.setStatus(NAME, "working");
 
-      const { worker: genA, child: childA } = makeFakeWorker({
+      const { worker: genA, handle: handleA } = makeFakeWorker({
         agentName: NAME,
         turnId: "turn-genA",
       });
       // Simulate the worker already gone so drainLiveWorker resolves
       // immediately (exitCode set → the early kill-pgrp branch returns).
-      childA.exitCode = 0;
+      handleA.setAlive(false);
       lifecycle.__putLiveWorkerForTest(NAME, genA as never);
 
       // Refork tears down genA (live.delete) and writes idle.
@@ -272,20 +273,20 @@ describe("FRI-145 M2: Generation = object identity", () => {
       await registry.registerAgent({ name: NAME, type: "bare" });
       await registry.setStatus(NAME, "working");
 
-      const { worker, child } = makeFakeWorker({
+      const { worker, handle } = makeFakeWorker({
         agentName: NAME,
         turnId: "turn-abort-archive",
         status: "working",
       });
       // Child already exited → archiveAgent's drainLiveWorker returns via the
       // early `exitCode !== null` branch (no real `child.once` on the double).
-      child.exitCode = 0;
+      handle.setAlive(false);
       lifecycle.__putLiveWorkerForTest(NAME, worker as never);
 
       vi.useFakeTimers();
       // Arm the 500ms force-kill deadline.
-      expect(lifecycle.abortTurn(NAME)).toBe(true);
-      expect(child.send).toHaveBeenCalledWith({ type: "abort" });
+      expect(await lifecycle.abortTurn(NAME)).toBe(true);
+      expect(handle.send).toHaveBeenCalledWith({ type: "abort" });
 
       // Spy AFTER the abort so we capture only writes from here on. Archive
       // runs first: it `live.delete`s NAME and writes `archived`.
@@ -332,7 +333,7 @@ describe("FRI-145 M2: Generation = object identity", () => {
       );
 
       vi.useFakeTimers();
-      expect(lifecycle.abortTurn(NAME)).toBe(true);
+      expect(await lifecycle.abortTurn(NAME)).toBe(true);
       await vi.advanceTimersByTimeAsync(600);
       vi.useRealTimers();
 
@@ -379,7 +380,7 @@ describe("FRI-145 M2: Generation = object identity", () => {
       );
 
       vi.useFakeTimers();
-      lifecycle.abortTurn(NAME);
+      await lifecycle.abortTurn(NAME);
       await vi.advanceTimersByTimeAsync(600);
       vi.useRealTimers();
       await vi.waitFor(

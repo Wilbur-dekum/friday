@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -43,15 +44,11 @@ interface FakeChild {
 
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: unknown;
-  child: FakeChild;
+  handle: FakeWorkerHandle;
 } {
-  const child: FakeChild = {
-    send: vi.fn(),
-    exitCode: null,
-    killed: false,
-  };
+  const handle = fakeWorkerHandle();
   const w = {
-    child,
+    handle,
     // pgid 0 → killPgrp no-ops, so we don't actually SIGTERM the test runner.
     pgid: 0,
     agentName: "stale-agent",
@@ -72,7 +69,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     completedAtLeastOnce: false,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 interface CapturedEvent {

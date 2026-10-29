@@ -16,7 +16,6 @@
  */
 
 import { eq } from "drizzle-orm";
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,12 +85,7 @@ import {
   sandboxExecAvailable,
   writeProfile,
 } from "./sandbox-profile.js";
-import type {
-  WorkerCommand,
-  WorkerEvent,
-  WorkerPromptCommand,
-  WorkerSpawnOptions,
-} from "./worker-protocol.js";
+import type { WorkerEvent, WorkerPromptCommand, WorkerSpawnOptions } from "./worker-protocol.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, "worker.js");
@@ -270,8 +264,6 @@ function isCurrentGeneration(w: LiveWorker): boolean {
   return live.get(w.agentName) === w;
 }
 
-
-
 export interface SpawnTurnInput {
   agentName: string;
   options: WorkerSpawnOptions;
@@ -427,7 +419,6 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // Overridable via env for emergency tuning.
   const cpuLimit = process.env.FRIDAY_WORKER_CPU_LIMIT ?? "3600";
   const nofileLimit = process.env.FRIDAY_WORKER_NOFILE_LIMIT ?? "4096";
-  const ULIMIT_PRELUDE = `ulimit -t ${cpuLimit}; ulimit -n ${nofileLimit}; exec "$@"`;
 
   // FRI-2037: spawn through the runtime seam. HOW a worker is started —
   // detached process group, bash, sandbox-exec, ulimit — belongs to the local
@@ -2265,8 +2256,4 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // Already handled by the once() listener that sends `start`.
       break;
   }
-}
-
-function send(child: ChildProcess, cmd: WorkerCommand): void {
-  if (child.send) child.send(cmd);
 }

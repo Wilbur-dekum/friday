@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // Pending-message feature: a second POST /api/chat/turn while the worker
@@ -42,11 +43,11 @@ interface FakeChild {
 
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: unknown;
-  child: FakeChild;
+  handle: FakeWorkerHandle;
 } {
-  const child: FakeChild = { send: vi.fn(), exitCode: null, killed: false };
+  const handle = fakeWorkerHandle();
   const w = {
-    child,
+    handle,
     // pgid 0 makes killPgrp a no-op — we never want the test to SIGTERM
     // a real process.
     pgid: 0,
@@ -68,7 +69,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     completedAtLeastOnce: false,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 describe("lifecycle: queued user-block dispatch", () => {
@@ -157,7 +158,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     const { dispatchTurn, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
 
-    const { worker, child } = makeFakeWorker();
+    const { worker, handle } = makeFakeWorker();
     __putLiveWorkerForTest("queued-agent", worker as never);
 
     dispatchTurn({
@@ -182,7 +183,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     expect(w.nextPrompts[0].turnId).toBe("t_q3");
     expect(w.nextPrompts[0].userBlockId).toBe("block-q3");
     // ...and the worker is nudged to break at next iteration boundary.
-    expect(child.send).toHaveBeenCalledWith({ type: "prompts-pending" });
+    expect(handle.send).toHaveBeenCalledWith({ type: "prompts-pending" });
 
     __deleteLiveWorkerForTest("queued-agent");
   });
@@ -246,7 +247,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     expect(beforeRow!.status).toBe("queued");
     const beforeTs = beforeRow!.ts;
 
-    const { worker, child } = makeFakeWorker({
+    const { worker, handle } = makeFakeWorker({
       // Pretend a queued prompt is parked behind the in-flight turn.
       nextPrompts: [
         {
@@ -299,7 +300,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     expect(afterRow!.status).toBe("complete");
     expect(afterRow!.ts).toBeGreaterThan(beforeTs);
     // The queued IPC ran too: the worker received `prompt` after the drain.
-    expect(child.send).toHaveBeenCalledWith(expect.objectContaining({ type: "prompt" }));
+    expect(handle.send).toHaveBeenCalledWith(expect.objectContaining({ type: "prompt" }));
   });
 
   it("queued prompt drains with the LIVE w.sessionId, not the POST-time resumeSessionId (FRI-127 §6)", async () => {
@@ -308,7 +309,7 @@ describe("lifecycle: queued user-block dispatch", () => {
 
     // The worker has already moved its session on to "sess-NEW" (a prior turn
     // resolved + the session-update IPC updated w.sessionId).
-    const { worker, child } = makeFakeWorker({ sessionId: "sess-NEW", status: "working" });
+    const { worker, handle } = makeFakeWorker({ sessionId: "sess-NEW", status: "working" });
     __putLiveWorkerForTest("queued-agent", worker as never);
 
     // A new turn is POSTed while the worker is mid-turn. The dispatch captures
@@ -343,7 +344,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     );
 
     // The IPC the worker actually received resumes the live session.
-    const sentIpc = child.send.mock.calls
+    const sentIpc = handle.send.mock.calls
       .map((c) => c[0] as { type?: string; options?: { resumeSessionId?: string } })
       .find((m) => m.type === "prompt");
     expect(sentIpc).toBeDefined();

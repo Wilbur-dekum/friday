@@ -21,6 +21,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 
 const MIN = 60_000;
 
@@ -87,7 +88,7 @@ describe("FRI-58: activePrompt cleared on every turn-end exit", () => {
 
   function makeFakeWorker(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      child: { send: vi.fn(), exitCode: null, killed: false },
+      handle: fakeWorkerHandle(),
       pgid: 0,
       agentName: "lbs-agent",
       agentType: "orchestrator",
