@@ -2684,6 +2684,19 @@ const INLINE_SERVE_MIME_ALLOWLIST = new Set<string>([
  *  2. Host header must be a loopback name (defeats DNS-rebind: a hostile
  *     page resolving `attacker.example` to 127.0.0.1 will send
  *     `Host: attacker.example` and fail this check).
+ *
+ * FRI-2037 — THIS IS THE WORKER↔DAEMON AUTH WALL. Layer 2 encodes "the caller
+ * is on this host", which stops being true the moment a worker runs in its own
+ * container (FRI-2038). Every Friday MCP tool reaches the daemon through
+ * `daemonFetch`, so a containerised worker sending `Host: friday-daemon:7610`
+ * fails here and every tool call 403s.
+ *
+ * `resolveDaemonBaseUrl` makes the worker's side configurable; this side is
+ * deliberately NOT yet, because loosening it is an authentication decision,
+ * not a plumbing one. Whatever replaces layer 2 has to survive a real network
+ * hop — the daemon secret alone does not, since it is a bearer token sitting
+ * on a volume any builder in that container can read (the residual risk
+ * FRI-2062 accepted). Do not relax `isLocalHost` without replacing it.
  */
 function authorizeSameHost(req: IncomingMessage): boolean {
   if (!isLocalHost(req.headers.host)) return false;

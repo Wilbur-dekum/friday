@@ -448,6 +448,38 @@ export const PROD_DASHBOARD_PORT = 7615;
  * Invalid env values (non-numeric, NaN, ≤0) are ignored so a typo
  * doesn't silently mis-bind.
  */
+/**
+ * Base URL the worker's MCP tools use to reach the daemon (FRI-2037).
+ *
+ * Every Friday tool — `mail_send`, `ticket_create`, `agent_create`, memory,
+ * apps, linear — funnels through `daemonFetch`, which hardcoded
+ * `http://127.0.0.1:<port>`. That constant is one half of the worker↔daemon
+ * seam this ticket exists to make explicit: a worker running in its OWN
+ * container (FRI-2038) would resolve `127.0.0.1` to ITSELF, and every tool
+ * call would fail.
+ *
+ * Making it configuration mirrors what FRI-2004 did for the Postgres
+ * connection: nothing may assume a stable host. The default is byte-identical
+ * to the previous constant, so laptop and single-container behaviour are
+ * unchanged.
+ *
+ * WARNING — a non-loopback value does NOT work yet, and fails closed rather
+ * than silently. `authorizeSameHost` in the daemon's API gates every one of
+ * these endpoints on TWO layers: the daemon secret, and a `Host` header that
+ * must be a loopback name (a deliberate DNS-rebind defence). A worker reaching
+ * `http://friday-daemon:7610` sends `Host: friday-daemon:7610` and is rejected
+ * by the second layer. Replacing that layer with an authentication model that
+ * survives a real network hop is the next slice of FRI-2037 — it is an auth
+ * change, not a URL change, which is exactly why the seam is worth naming
+ * before FRI-2038 needs it.
+ */
+export function resolveDaemonBaseUrl(port: number, env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.FRIDAY_DAEMON_URL?.trim();
+  // Trailing slashes would double up against the leading `/` on every path.
+  if (configured) return configured.replace(/\/+$/, "");
+  return `http://127.0.0.1:${port}`;
+}
+
 export function resolveDaemonPort(cfg: FridayConfig): number {
   const envRaw = process.env.FRIDAY_DAEMON_PORT;
   if (envRaw) {
