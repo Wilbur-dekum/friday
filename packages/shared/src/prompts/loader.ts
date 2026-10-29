@@ -139,6 +139,62 @@ export function renderIdentityBlock(identity: AgentIdentity): string {
 }
 
 /**
+ * The **User** on whose behalf this turn is running (FRI-2016, ADR-052/053).
+ *
+ * `undefined` is a real and permanent case, not a gap to be filled later: a
+ * scheduled run, a mail-triggered turn and an `agent_spawn` have no human
+ * behind them. Code downstream must treat "no acting User" as normal rather
+ * than as missing data — including ADR-053's role gate, where absent means
+ * "not a User action" and not "allow".
+ */
+export interface ActingUser {
+  id: string;
+  /** Both NOT NULL on the `user` table, so neither is optional here. */
+  name: string;
+  email: string;
+}
+
+/**
+ * Tell the agent who is speaking, as a PER-TURN block.
+ *
+ * ADR-052 wants Friday to address whoever is actually talking rather than a
+ * generic "the user" — which matters the moment an Organization has more than
+ * one member, and again per-Transport, where the same person arrives over
+ * Slack and the web dashboard.
+ *
+ * FRI-2016 (reversal, before merge): this is NOT composed into the system
+ * prompt. The daemon never re-sends a system prompt to a live worker —
+ * `WorkerPromptCommand` has no `systemPrompt` field and `dispatchTurn`'s
+ * live-worker branch does not carry one — so anything in the system prompt is
+ * materialized once per worker FORK and frozen for every later turn of that
+ * worker, including across `resume`. A long-lived orchestrator forked while
+ * Ada was speaking would keep telling the model it is speaking with Ada after
+ * Bob takes over: precisely the misattribution this block exists to prevent.
+ *
+ * This repo has made and reversed that mistake twice already — FRI-89 moved
+ * memory recall off `systemPrompt.append`, FRI-167 did the same for the
+ * datetime line. Both ride the per-turn body channel instead, which is a fresh
+ * user message every turn and therefore resume-proof. So does this.
+ *
+ * Tagged like `<memory-context>` rather than headed like `# Identity`, because
+ * the envelope is what signals "per-turn context" instead of "another element
+ * of the prompt stack".
+ *
+ * The id is included deliberately. It is what tools stamp for the audit and
+ * erasure obligations in ADR-053, so the agent must be able to name it without
+ * inferring it from an email address.
+ */
+export function renderActingUserBlock(user: ActingUser): string {
+  return [
+    `<acting-user id="${user.id}">`,
+    `You are speaking with ${user.name} <${user.email}>.`,
+    `Use the id \`${user.id}\` verbatim when a tool asks which User acted.`,
+    "Address this person directly. Do not assume they are the only User, and do not attribute their requests, preferences or history to anyone else.",
+    "</acting-user>",
+  ].join("\n");
+}
+
+/**
  * Compose the system prompt in the canonical order:
  *   1. CONSTITUTION
  *   2. SOUL
@@ -159,6 +215,8 @@ export function composeSystemPrompt(
   pinnedFacts?: string,
 ): string {
   const identityBlock = identity ? renderIdentityBlock(identity) : "";
+  // NOTE: the acting User is deliberately NOT here — see renderActingUserBlock.
+  // The system prompt is fork-time only, and the speaker varies per turn.
   return [
     stack.constitution,
     stack.soul,

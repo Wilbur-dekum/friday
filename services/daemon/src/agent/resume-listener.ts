@@ -69,6 +69,7 @@ import {
   schema,
   LISTEN_CHANNELS,
 } from "@friday/shared";
+import { resolveActingUser } from "@friday/shared/services";
 import { getBlockById } from "@friday/shared/services";
 import * as registry from "./registry.js";
 import { dispatchTurn, findAgentByTurnId, peekLiveWorker } from "./lifecycle.js";
@@ -233,11 +234,16 @@ async function processResumeRequestedRow(blockId: string): Promise<void> {
     body: dispatchBody,
     systemPrompt,
     allowedToolsOverride,
-  } = await buildDispatchPrompt(agentRow, {
-    kind: "user_chat",
-    userText: promptText,
-    skillMatch: skillMatch ?? undefined,
-  });
+  } = await buildDispatchPrompt(
+    agentRow,
+    {
+      kind: "user_chat",
+      userText: promptText,
+      skillMatch: skillMatch ?? undefined,
+    },
+    // FRI-2016: same acting User as the original user-chat turn this resumes.
+    (await resolveActingUser(row.userId)) ?? undefined,
+  );
 
   const cfg = loadConfig();
   const modelCfg = resolveModelForRole(cfg, agentRow.type);
