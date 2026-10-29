@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { hostedServerPath, isHostedServer } from "./host.js";
+import { hostedServerNames, hostedServerPath, isHostedServer } from "./host.js";
 
 /**
  * FRI-2074: a hosted server must only read `extra` fields the MCP transport
@@ -27,21 +27,15 @@ import { hostedServerPath, isHostedServer } from "./host.js";
 
 const MCP_DIR = dirname(fileURLToPath(import.meta.url));
 
-/** Server name → the module that builds it. Mirrors host.ts's HOSTED map. */
-const HOSTED_MODULES: Record<string, string> = {
-  "friday-agents": "agents.ts",
-  "friday-apps": "apps.ts",
-  "friday-echo": "echo.ts",
-  "friday-evolve": "evolve.ts",
-  "friday-habit": "habit.ts",
-  "friday-inbox": "inbox.ts",
-  "friday-integrations": "integrations.ts",
-  "friday-mail": "mail.ts",
-  "friday-memory": "memory.ts",
-  "friday-reminder": "reminder.ts",
-  "friday-schedule": "schedule.ts",
-  "friday-tickets": "tickets.ts",
-};
+/**
+ * Server name → the module that builds it, DERIVED from HOSTED rather than
+ * hardcoded. `friday-tickets` lives in `tickets.ts`, and every server follows
+ * that convention — so a newly hosted server is covered automatically instead
+ * of silently escaping the check.
+ */
+function moduleFor(name: string): string {
+  return `${name.replace(/^friday-/, "")}.ts`;
+}
 
 /**
  * Fields the Agent SDK supplies in-process but the MCP transport does not.
@@ -57,14 +51,20 @@ describe("hosted MCP servers are transport-portable", () => {
   it("covers every server host.ts actually hosts", () => {
     // Guards the guard: a server added to HOSTED without a line here would
     // otherwise be silently unchecked.
-    for (const name of Object.keys(HOSTED_MODULES)) {
+    const names = hostedServerNames();
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) {
       expect(isHostedServer(name), `${name} should be hosted`).toBe(true);
-      expect(hostedServerPath(name as never)).toBe(`/api/mcp/${name}`);
+      expect(hostedServerPath(name)).toBe(`/api/mcp/${name}`);
+      // The module must exist, or the convention below is quietly checking
+      // nothing for this server.
+      expect(() => sourceOf(moduleFor(name)), `${moduleFor(name)} must exist`).not.toThrow();
     }
   });
 
   it("reads no SDK-only field off `extra`", () => {
-    for (const [name, file] of Object.entries(HOSTED_MODULES)) {
+    for (const name of hostedServerNames()) {
+      const file = moduleFor(name);
       const src = sourceOf(file);
       for (const field of SDK_ONLY_EXTRA_FIELDS) {
         expect(

@@ -177,12 +177,14 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     opts.callerType === "helper" ||
     opts.callerType === "bare"
   ) {
-    servers[SECRETS_SERVER_NAME] = buildSecretsServer({
-      callerName: opts.callerName,
-      callerType: opts.callerType,
-      daemonPort: opts.daemonPort,
-      appId: opts.appContext?.appId,
-    });
+    servers[SECRETS_SERVER_NAME] = hostedOr(SECRETS_SERVER_NAME, opts, () =>
+      buildSecretsServer({
+        callerName: opts.callerName,
+        callerType: opts.callerType,
+        daemonPort: opts.daemonPort,
+        appId: opts.appContext?.appId,
+      }),
+    );
   }
 
   // friday-tickets: orchestrator, builder, helper. Bare and scheduled don't

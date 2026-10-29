@@ -13,6 +13,7 @@ import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
 import { buildMemoryServer, MEMORY_SERVER_NAME } from "./memory.js";
 import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
+import { buildSecretsServer, SECRETS_SERVER_NAME } from "./secrets.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
 
 /**
@@ -76,7 +77,19 @@ import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
  * held a fully-received request open past a 2s `requestTimeout` and was never
  * closed.)
  *
- * Still absent: `friday-secrets` (touches the age vault — FRI-2075).
+ * `friday-secrets` is hosted (FRI-2075), and hosting it STRENGTHENS it. Its
+ * authorization decision — `canFetchOnDemand`, `isSecretsLocked` — used to run
+ * inside the worker, i.e. inside the process running untrusted repository
+ * code, which is `docs/sandbox.md` residual risk #1 applied to the one tool
+ * surface where it matters most. Daemon-side, a compromised worker can ask but
+ * cannot rewrite the answer.
+ *
+ * Its old header claimed safety came from "trusted worker spawn options, not
+ * HTTP headers". Hosted, identity comes from the per-worker token instead,
+ * which is stronger: the daemon mints it, the worker cannot forge it, and it
+ * is revoked on exit. `appId` — which scopes WHICH App's secrets are reachable
+ * — is derived from that token rather than asserted, which is the whole reason
+ * FRI-2037 put it on the mint.
  */
 const HOSTED = {
   [AGENTS_SERVER_NAME]: buildAgentsServer,
@@ -90,6 +103,7 @@ const HOSTED = {
   [MAIL_SERVER_NAME]: buildMailServer,
   [MEMORY_SERVER_NAME]: buildMemoryServer,
   [SCHEDULE_SERVER_NAME]: buildScheduleServer,
+  [SECRETS_SERVER_NAME]: buildSecretsServer,
   [TICKETS_SERVER_NAME]: buildTicketsServer,
 } as const;
 
@@ -97,6 +111,18 @@ export type HostedServerName = keyof typeof HOSTED;
 
 export function isHostedServer(name: string): name is HostedServerName {
   return Object.prototype.hasOwnProperty.call(HOSTED, name);
+}
+
+/**
+ * Every server this host serves.
+ *
+ * Exported so the guard tests DERIVE their coverage instead of hardcoding it.
+ * A hardcoded list only catches a name that is listed but not hosted; it
+ * silently misses the dangerous direction — a server newly added to HOSTED
+ * that nothing checks. FRI-2075 hit exactly that.
+ */
+export function hostedServerNames(): HostedServerName[] {
+  return Object.keys(HOSTED) as HostedServerName[];
 }
 
 /** The MCP path a worker should be pointed at for a hosted server. */
