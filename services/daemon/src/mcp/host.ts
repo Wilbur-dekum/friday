@@ -64,10 +64,19 @@ import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
  * self-asserted headers they would have been a privilege escalation; carried
  * on the token they are simply derived.
  *
- * Still absent, for reasons that are not about scoping:
- * `friday-elicitation` (round-trips to the user through a long-poll that has
- * to survive the transport change — FRI-2074) and `friday-secrets` (touches
- * the age vault — FRI-2075).
+ * `friday-elicitation` CANNOT be hosted as written (FRI-2074, measured). Its
+ * elicitation id is `extra.toolUseId`, which `createSdkMcpServer` injects
+ * in-process; the standard MCP transport's `extra` carries `requestId` and
+ * `signal` but no `toolUseId`, because tool_use_id is an Anthropic-API concept
+ * rather than an MCP one. Hosted, every `ask_user` fails with "invoked without
+ * a tool_use_id". It needs a different correlation id, not a port.
+ *
+ * (Its long-poll is NOT the blocker, contrary to the original guess: Node's
+ * `requestTimeout` governs request RECEIPT, not response latency — a probe
+ * held a fully-received request open past a 2s `requestTimeout` and was never
+ * closed.)
+ *
+ * Still absent: `friday-secrets` (touches the age vault — FRI-2075).
  */
 const HOSTED = {
   [AGENTS_SERVER_NAME]: buildAgentsServer,
