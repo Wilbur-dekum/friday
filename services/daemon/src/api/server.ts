@@ -166,7 +166,7 @@ import { reportPresence } from "../notifications/presence.js";
 import { notify } from "../notifications/notify.js";
 import type { PushSubscribePayload, PresenceReport, NotifyEventType } from "@friday/shared";
 import { NOTIFY_EVENT_TYPES } from "@friday/shared";
-import { callerFromHeaders, handleHostedMcp, isHostedServer } from "../mcp/host.js";
+import { callerFromRequest, handleHostedMcp, isHostedServer } from "../mcp/host.js";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -330,10 +330,13 @@ export const ROUTES: RouteRow[] = [
         writeJson(ctx.res, 404, { error: `unknown MCP server: ${name}` });
         return;
       }
-      const caller = callerFromHeaders(ctx.req.headers, resolveDaemonPort(ctx.cfg));
+      const caller = callerFromRequest(ctx.req.headers, resolveDaemonPort(ctx.cfg));
       if (!caller) {
-        writeJson(ctx.res, 400, {
-          error: "x-friday-caller-name and a valid x-friday-caller-type are required",
+        // 401, not 400: a missing or revoked token is an authentication
+        // failure, and a revoked one is the case that matters — a worker that
+        // has exited must stop being able to act.
+        writeJson(ctx.res, 401, {
+          error: "a valid per-worker bearer token is required",
         });
         return;
       }
