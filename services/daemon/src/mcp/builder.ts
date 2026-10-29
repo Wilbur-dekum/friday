@@ -110,8 +110,13 @@ function hostedOr(
     url: `${resolveDaemonBaseUrl(opts.daemonPort)}${hostedServerPath(name)}`,
     headers: {
       [DAEMON_SECRET_HEADER]: getDaemonSecret(),
-      "x-friday-caller-name": opts.callerName,
-      "x-friday-caller-type": opts.callerType,
+      // FRI-2037: the worker proves WHICH worker it is. The daemon derives
+      // callerName/callerType from this token, so the worker no longer names
+      // itself — a worker holding the shared secret could previously claim to
+      // be any agent. Minted at spawn, revoked on exit (worker-tokens.ts).
+      ...(process.env.FRIDAY_WORKER_TOKEN
+        ? { authorization: `Bearer ${process.env.FRIDAY_WORKER_TOKEN}` }
+        : {}),
     },
   };
 }

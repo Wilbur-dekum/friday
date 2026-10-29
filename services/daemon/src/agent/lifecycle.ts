@@ -31,6 +31,7 @@ import {
 } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
+import { mintWorkerToken, revokeWorkerToken } from "./worker-tokens.js";
 import { captureFor } from "../posthog.js";
 import { type ArchiveReason } from "@friday/shared";
 import { closeTicketForArchive } from "../services/ticket-close.js";
@@ -430,8 +431,17 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // and anything it spawns inherit. That is where untrusted repository code
   // runs, and it is not a blanket strip either: the CLI needs its own
   // Anthropic credentials to function. See FRI-2059.
+  // FRI-2037: mint this worker's bearer token BEFORE the env is assembled, so
+  // it ships with the process. The daemon derives the caller from it rather
+  // than trusting headers the worker sets for itself — see worker-tokens.ts.
+  const workerToken = mintWorkerToken({
+    callerName: input.agentName,
+    callerType: input.options.agentType,
+  });
+
   const env = {
     ...process.env,
+    FRIDAY_WORKER_TOKEN: workerToken,
     // FRI-2014: bridge the resolved Anthropic credential into the worker.
     //
     // The daemon's own env is deliberately clean of secrets (above), and the
@@ -604,6 +614,9 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
       message: err instanceof Error ? err.message : String(err),
     });
     if (profilePath) removeProfile(profilePath);
+    // FRI-2037: the token dies with the worker. A builder that errored out
+    // must not keep a usable credential.
+    revokeWorkerToken(workerToken);
     if (isCurrentGeneration(w)) live.delete(input.agentName);
     fireOnExit("error");
   });
@@ -613,6 +626,11 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
       code,
       signal,
     });
+    // FRI-2037: revoke unconditionally, BEFORE the Generation guard below.
+    // That guard exists to stop a stale exit clobbering a replacement worker's
+    // bookkeeping, but the token is this process's own and must die with it
+    // either way — a refork mints a fresh one.
+    revokeWorkerToken(workerToken);
     // M2: clean up the per-worker SBPL profile. Best-effort; the file is
     // owner-only and idempotent so a leak is harmless beyond the disk space.
     // Always runs — the profile file belongs to THIS worker process whether

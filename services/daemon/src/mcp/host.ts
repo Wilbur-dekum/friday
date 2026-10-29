@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AgentType } from "@friday/shared";
+import { resolveWorkerToken } from "../agent/worker-tokens.js";
 import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
@@ -119,15 +120,41 @@ const AGENT_TYPES: readonly string[] = [
   "planner",
 ];
 
-export function callerFromHeaders(
+/** Extract a bearer token from an Authorization header. */
+function bearer(headers: IncomingMessage["headers"]): string | undefined {
+  const raw = headers.authorization;
+  if (typeof raw !== "string") return undefined;
+  const m = /^Bearer (.+)$/i.exec(raw.trim());
+  return m?.[1];
+}
+
+/**
+ * Identify the caller for a hosted request.
+ *
+ * DERIVED from the per-worker token, never read from client-supplied
+ * `x-friday-caller-*` headers. That is the whole point of FRI-2037's token
+ * slice: those headers were self-asserted, so any worker holding the shared
+ * daemon secret could claim to be any agent. Deriving the caller from a
+ * credential the daemon minted for one specific worker is what makes it safe
+ * to host servers whose scoping values (`parentName`, `appId`) must not be
+ * claimed by the caller.
+ *
+ * Returns null when no valid token is presented — the route 401s rather than
+ * falling back to headers. A fallback would reintroduce exactly the weakness
+ * this removes, so there deliberately is not one.
+ */
+export function callerFromRequest(
   headers: IncomingMessage["headers"],
   daemonPort: number,
 ): HostedCaller | null {
-  const name = headers["x-friday-caller-name"];
-  const type = headers["x-friday-caller-type"];
-  if (typeof name !== "string" || !name) return null;
-  if (typeof type !== "string" || !AGENT_TYPES.includes(type)) return null;
-  return { callerName: name, callerType: type as AgentType, daemonPort };
+  const identity = resolveWorkerToken(bearer(headers));
+  if (!identity) return null;
+  if (!AGENT_TYPES.includes(identity.callerType)) return null;
+  return {
+    callerName: identity.callerName,
+    callerType: identity.callerType,
+    daemonPort,
+  };
 }
 
 /**
