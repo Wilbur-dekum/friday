@@ -12,7 +12,7 @@
  * is safe and keeps the helper uniform.
  */
 
-import { DAEMON_SECRET_HEADER, getDaemonSecret } from "@friday/shared";
+import { DAEMON_SECRET_HEADER, getDaemonSecret, resolveDaemonBaseUrl } from "@friday/shared";
 
 /**
  * Extract the AbortSignal from the SDK's `extra` argument passed to MCP tool
@@ -50,7 +50,9 @@ export interface DaemonFetchOptions {
 }
 
 export async function daemonFetch<T = unknown>(opts: DaemonFetchOptions): Promise<T> {
-  const url = `http://127.0.0.1:${opts.port}${opts.path}`;
+  // FRI-2037: the host is configuration, not a constant — see
+  // `resolveDaemonBaseUrl`. Default is byte-identical to the old literal.
+  const url = `${resolveDaemonBaseUrl(opts.port)}${opts.path}`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
     [DAEMON_SECRET_HEADER]: getDaemonSecret(),
