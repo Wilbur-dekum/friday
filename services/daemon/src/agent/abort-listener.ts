@@ -67,7 +67,7 @@ async function processAbortRequestedRow(blockId: string): Promise<void> {
   // Dispatch the existing lifecycle abort. Returns false when no
   // live worker exists — that's fine; the row's status flip-back
   // below still completes the cycle.
-  const aborted = abortTurn(row.agentName);
+  const aborted = await abortTurn(row.agentName);
 
   // Flip the row back to its terminal state so the trigger doesn't
   // re-fire on the next UPDATE to this row. The user block lives at

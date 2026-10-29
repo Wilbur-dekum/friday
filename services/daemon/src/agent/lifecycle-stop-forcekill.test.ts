@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { eq } from "drizzle-orm";
 import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
@@ -35,15 +36,11 @@ interface FakeChild {
 
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: unknown;
-  child: FakeChild;
+  handle: FakeWorkerHandle;
 } {
-  const child: FakeChild = {
-    send: vi.fn(),
-    exitCode: null,
-    killed: false,
-  };
+  const handle = fakeWorkerHandle();
   const w = {
-    child,
+    handle,
     // pgid 0 makes killPgrp a no-op — we don't want the test to actually
     // SIGTERM anything in the test runner.
     pgid: 0,
@@ -65,7 +62,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     completedAtLeastOnce: false,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 interface CapturedEvent {
@@ -90,14 +87,14 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     // is now async (ADR-023) and the fire-and-forget chain inside the
     // timer callback resolves after pending Postgres writes commit.
     vi.useFakeTimers();
-    const { worker, child } = makeFakeWorker();
+    const { worker, handle } = makeFakeWorker();
     __putLiveWorkerForTest("fk-agent", worker as never);
 
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    expect(abortTurn("fk-agent")).toBe(true);
-    expect(child.send).toHaveBeenCalledWith({ type: "abort" });
+    expect(await abortTurn("fk-agent")).toBe(true);
+    expect(handle.send).toHaveBeenCalledWith({ type: "abort" });
 
     // Before the deadline, no force-kill yet.
     await vi.advanceTimersByTimeAsync(300);
@@ -157,7 +154,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    abortTurn("fk-agent");
+    await abortTurn("fk-agent");
 
     // Worker responds at 200ms with turn-complete (the SDK aborted cleanly).
     await vi.advanceTimersByTimeAsync(200);
@@ -215,7 +212,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    abortTurn("fk-agent");
+    await abortTurn("fk-agent");
 
     await vi.advanceTimersByTimeAsync(200);
     // Worker emits error IPC because SDK threw an AbortError.
@@ -268,7 +265,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    abortTurn("fk-agent");
+    await abortTurn("fk-agent");
     await vi.advanceTimersByTimeAsync(700);
     // Now force-kill has run. The worker, dying, emits one final turn-complete.
     await handleEvent(worker as never, {
@@ -297,7 +294,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
 
   it("abortTurn returns false when no live worker matches", async () => {
     const { abortTurn } = await import("./lifecycle.js");
-    expect(abortTurn("not-a-real-agent")).toBe(false);
+    expect(await abortTurn("not-a-real-agent")).toBe(false);
   });
 
   // FRI-95 A.1: the LISTEN handler races the fast-path. After the fast-path
@@ -312,16 +309,16 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const { eventBus } = await import("../events/bus.js");
 
     vi.useFakeTimers();
-    const { worker, child } = makeFakeWorker({ turnId: "turn-fk-a1" });
+    const { worker, handle } = makeFakeWorker({ turnId: "turn-fk-a1" });
     __putLiveWorkerForTest("fk-agent", worker as never);
 
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
     // Fast-path abort. Worker is working — full body runs (IPC sent, deadline armed).
-    expect(abortTurn("fk-agent")).toBe(true);
-    expect(child.send).toHaveBeenCalledWith({ type: "abort" });
-    const ipcCallsAfterFirst = child.send.mock.calls.length;
+    expect(await abortTurn("fk-agent")).toBe(true);
+    expect(handle.send).toHaveBeenCalledWith({ type: "abort" });
+    const ipcCallsAfterFirst = handle.send.mock.calls.length;
     expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeDefined();
 
     // Worker honors the abort — error IPC clears the deadline AND flips status to idle.
@@ -336,9 +333,9 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
 
     // LISTEN handler fires the second abortTurn ~91ms after the fast-path
     // (matching the real-world log timing). With the A.1 gate this is a no-op.
-    expect(abortTurn("fk-agent")).toBe(false);
+    expect(await abortTurn("fk-agent")).toBe(false);
     // No new IPC sent — the gate short-circuited before send().
-    expect(child.send.mock.calls.length).toBe(ipcCallsAfterFirst);
+    expect(handle.send.mock.calls.length).toBe(ipcCallsAfterFirst);
     // No new deadline armed — would otherwise force-kill at +500ms.
     expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeUndefined();
     // abortRequested still latched (idempotent state, not destructive).
@@ -389,7 +386,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    abortTurn("fk-agent");
+    await abortTurn("fk-agent");
     expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeDefined();
 
     // Lone status-change → idle, no turn-complete or error.

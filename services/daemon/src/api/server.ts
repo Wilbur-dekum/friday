@@ -465,14 +465,14 @@ export const ROUTES: RouteRow[] = [
     method: "POST",
     match: "/api/internal/abort-turn",
     body: "json",
-    handler: (ctx) => {
+    handler: async (ctx) => {
       const body = ctx.body as { turn_id?: string };
       const turnId = body.turn_id;
       if (typeof turnId !== "string" || turnId.length === 0) {
         return { status: 400, body: { error: "missing_turn_id" } };
       }
       const agent = findAgentByTurnId(turnId);
-      const aborted = agent ? abortTurn(agent) : false;
+      const aborted = agent ? await abortTurn(agent) : false;
       return { status: 200, body: { ok: true, aborted, turn_id: turnId, agent } };
     },
   },
@@ -611,9 +611,9 @@ export const ROUTES: RouteRow[] = [
   {
     method: "POST",
     match: /^\/api\/agents\/[^/]+\/abort$/,
-    handler: (ctx) => {
+    handler: async (ctx) => {
       const name = ctx.path.split("/")[3];
-      const aborted = abortTurn(name);
+      const aborted = await abortTurn(name);
       return { status: 200, body: { aborted } };
     },
   },

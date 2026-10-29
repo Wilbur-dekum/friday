@@ -30,6 +30,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
@@ -56,15 +57,11 @@ interface FakeChild {
 
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: { turnStart: number | undefined } & Record<string, unknown>;
-  child: FakeChild;
+  handle: FakeWorkerHandle;
 } {
-  const child: FakeChild = {
-    send: vi.fn(),
-    exitCode: null,
-    killed: false,
-  };
+  const handle = fakeWorkerHandle();
   const w = {
-    child,
+    handle,
     pgid: 0,
     agentName: "ts-clear-agent",
     agentType: "orchestrator",
@@ -86,7 +83,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     zeroBlockTurnStreak: 0,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 describe("lifecycle: w.turnStart cleared on every turn-end path (FRI-110, FRI-116)", () => {

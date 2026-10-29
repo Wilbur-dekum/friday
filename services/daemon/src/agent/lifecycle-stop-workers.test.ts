@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 import type { LiveWorker } from "./lifecycle.js";
 
@@ -24,11 +25,14 @@ beforeEach(async () => {
 
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: unknown;
-  child: { send: ReturnType<typeof vi.fn>; exitCode: number | null; killed: boolean };
+  handle: FakeWorkerHandle;
 } {
-  const child = { send: vi.fn(), exitCode: 0 as number | null, killed: false };
+  // `alive: false` preserves the original mock's `exitCode: 0`: these workers
+  // are already gone, so `drainLiveWorker` takes its early-return branch
+  // instead of waiting for an exit that never arrives.
+  const handle = fakeWorkerHandle({ alive: false });
   const w = {
-    child,
+    handle,
     pgid: 0,
     agentName: "sw-agent",
     agentType: "bare",
@@ -53,7 +57,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     noMailBackStreak: 0,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 describe("stopWorkersForApp", () => {

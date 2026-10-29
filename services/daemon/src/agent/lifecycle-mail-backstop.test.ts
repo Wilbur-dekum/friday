@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
@@ -44,11 +45,11 @@ interface FakeChild {
 
 function makeHelperWorker(overrides: Record<string, unknown> = {}): {
   worker: unknown;
-  child: FakeChild;
+  handle: FakeWorkerHandle;
 } {
-  const child: FakeChild = { send: vi.fn(), exitCode: null, killed: false };
+  const handle = fakeWorkerHandle();
   const w = {
-    child,
+    handle,
     pgid: 0,
     agentName: "helper-1",
     agentType: "helper",
@@ -74,7 +75,7 @@ function makeHelperWorker(overrides: Record<string, unknown> = {}): {
     noMailBackStreak: 0,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 interface CapturedEvent {
@@ -95,12 +96,12 @@ async function driveTurnComplete(worker: unknown): Promise<void> {
 describe("mail-back backstop (FRI-127 §5)", () => {
   it("first no-mail-back miss re-dispatches exactly one nudge (Option B)", async () => {
     const { __putLiveWorkerForTest, __deleteLiveWorkerForTest } = await import("./lifecycle.js");
-    const { worker, child } = makeHelperWorker();
+    const { worker, handle } = makeHelperWorker();
     __putLiveWorkerForTest("helper-1", worker as never);
 
     await driveTurnComplete(worker);
 
-    const promptIpcs = child.send.mock.calls
+    const promptIpcs = handle.send.mock.calls
       .map((c) => c[0] as { type?: string; options?: { prompt?: string } })
       .filter((m) => m.type === "prompt");
     expect(promptIpcs).toHaveLength(1);
@@ -120,7 +121,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
 
     // Worker is mid-second-miss: the first nudge already fired (guard set,
     // streak 1), and this turn again produced content without mailing back.
-    const { worker, child } = makeHelperWorker({
+    const { worker, handle } = makeHelperWorker({
       noMailBackNudgedThisTurn: true,
       noMailBackStreak: 1,
       turnId: "t_h2",
@@ -134,7 +135,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
     await driveTurnComplete(worker);
 
     // (a) no re-dispatch.
-    const promptIpcs = child.send.mock.calls.filter(
+    const promptIpcs = handle.send.mock.calls.filter(
       (c) => (c[0] as { type?: string }).type === "prompt",
     );
     expect(promptIpcs).toHaveLength(0);
@@ -158,7 +159,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
 
     // The child reported home this turn (mailSendToParentThisTurn > 0) while a
     // prior miss had already armed the guard.
-    const { worker, child } = makeHelperWorker({
+    const { worker, handle } = makeHelperWorker({
       mailSendToParentThisTurn: 1,
       noMailBackNudgedThisTurn: true,
       noMailBackStreak: 1,
@@ -167,7 +168,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
 
     await driveTurnComplete(worker);
 
-    const promptIpcs = child.send.mock.calls.filter(
+    const promptIpcs = handle.send.mock.calls.filter(
       (c) => (c[0] as { type?: string }).type === "prompt",
     );
     expect(promptIpcs).toHaveLength(0);
@@ -272,12 +273,12 @@ describe("mail-back backstop (FRI-127 §5)", () => {
 
   it("no backstop for a zero-block turn (the wedge detector owns that case)", async () => {
     const { __putLiveWorkerForTest, __deleteLiveWorkerForTest } = await import("./lifecycle.js");
-    const { worker, child } = makeHelperWorker({ blocksThisTurn: 0 });
+    const { worker, handle } = makeHelperWorker({ blocksThisTurn: 0 });
     __putLiveWorkerForTest("helper-1", worker as never);
 
     await driveTurnComplete(worker);
 
-    const promptIpcs = child.send.mock.calls.filter(
+    const promptIpcs = handle.send.mock.calls.filter(
       (c) => (c[0] as { type?: string }).type === "prompt",
     );
     expect(promptIpcs).toHaveLength(0);
@@ -288,7 +289,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
 
   it("no backstop for an orchestrator (no parent)", async () => {
     const { __putLiveWorkerForTest, __deleteLiveWorkerForTest } = await import("./lifecycle.js");
-    const { worker, child } = makeHelperWorker({
+    const { worker, handle } = makeHelperWorker({
       agentType: "orchestrator",
       parentName: undefined,
     });
@@ -296,7 +297,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
 
     await driveTurnComplete(worker);
 
-    const promptIpcs = child.send.mock.calls.filter(
+    const promptIpcs = handle.send.mock.calls.filter(
       (c) => (c[0] as { type?: string }).type === "prompt",
     );
     expect(promptIpcs).toHaveLength(0);

@@ -27,6 +27,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -50,23 +51,17 @@ beforeEach(async () => {
   __resetForTest();
 });
 
-interface FakeChild {
-  send: ReturnType<typeof vi.fn>;
-  exitCode: number | null;
-  killed: boolean;
-}
-
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: Record<string, unknown> & { illegalTransitionsThisTurn: number };
-  child: FakeChild;
+  handle: FakeWorkerHandle;
 } {
-  const child: FakeChild = {
-    send: vi.fn(),
-    exitCode: null,
-    killed: false,
-  };
+  // FRI-2037: a WorkerHandle double, not a ChildProcess one. Every case in
+  // this file is a pure mock test — no real processes — so the shared fake is
+  // the right tool here (contrast lifecycle-abort-tool-kill, which spawns a
+  // real tree and needs a handle that really signals).
+  const handle = fakeWorkerHandle();
   const w = {
-    child,
+    handle,
     // pgid 0 → killPgrp no-ops, so we don't actually SIGTERM the test runner.
     pgid: 0,
     agentName: "fsm-agent",
@@ -97,7 +92,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     noMailBackStreak: 0,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, handle };
 }
 
 describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
@@ -272,7 +267,7 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
       expect(worker.illegalTransitionsThisTurn).toBe(0);
     });
 
-    it("(b) spawn-fresh path (child.once('message') callback) resets the counter", () => {
+    it("(b) spawn-fresh path (ready-handshake callback) resets the counter", () => {
       // The spawn-fresh boundary lives inside the `child.once("message", ...)`
       // callback in `spawnTurn`, which fires after the worker emits its
       // first `ready` IPC. Driving a real fork from a unit test is too
@@ -285,15 +280,20 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
       const __filename = fileURLToPath(import.meta.url);
       const lifecycleSrc = readFileSync(join(dirname(__filename), "lifecycle.ts"), "utf-8");
 
-      // Locate the `child.once("message", () => {` block and confirm both
-      // the turnStart write AND the illegalTransitionsThisTurn reset live
-      // inside it. We anchor on `send(child, {` which is the well-known
-      // terminator of the spawn-fresh callback (it sends the `start` IPC
-      // right after the per-turn resets). A future refactor that moves
-      // the block will trip a different anchor before silently passing.
-      const onceIdx = lifecycleSrc.indexOf('child.once("message"');
+      // Locate the ready-handshake block and confirm both the turnStart
+      // write AND the illegalTransitionsThisTurn reset live inside it. We
+      // anchor on the `start` IPC send, the well-known terminator of the
+      // spawn-fresh callback (it fires right after the per-turn resets). A
+      // future refactor that moves the block trips an anchor rather than
+      // silently passing.
+      //
+      // FRI-2037 renamed the anchors — `child.once("message"` became
+      // `handle.onceMessage(` and `send(child, {` became `handle.send({`
+      // when the worker boundary moved behind the runtime seam. The assertion
+      // is unchanged; only the names it looks for moved.
+      const onceIdx = lifecycleSrc.indexOf("handle.onceMessage(");
       expect(onceIdx).toBeGreaterThan(-1);
-      const sendIdx = lifecycleSrc.indexOf("send(child, {", onceIdx);
+      const sendIdx = lifecycleSrc.indexOf("handle.send({", onceIdx);
       expect(sendIdx).toBeGreaterThan(onceIdx);
       const onceBlock = lifecycleSrc.slice(onceIdx, sendIdx);
       expect(onceBlock).toContain("w.turnStart = Date.now()");
@@ -304,7 +304,7 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
       const { dispatchTurn, safeHandleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
         await import("./lifecycle.js");
 
-      const { worker, child } = makeFakeWorker({
+      const { worker, handle } = makeFakeWorker({
         turnId: "turn-fsm-reset-prev",
         // Worker is idle (just finished a turn) so dispatchTurn takes the
         // sendPrompt branch instead of forking. status === "idle" is the
@@ -347,7 +347,7 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
       // The send IPC fired (sanity: dispatchTurn actually took the
       // sendPrompt branch, not the queue branch which would `send` a
       // `prompts-pending` instead).
-      expect(child.send).toHaveBeenCalled();
+      expect(handle.send).toHaveBeenCalled();
 
       // (3) Post-reset: another illegal transition lands on the new turn.
       // The counter starts from 0, so it lands at 1 — NOT 2 (which would

@@ -16,7 +16,6 @@
  */
 
 import { eq } from "drizzle-orm";
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +30,16 @@ import {
 } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
+// FRI-2037: the kill primitives moved to the runtime, which owns HOW a worker
+// is stopped. Re-exported so existing callers and lifecycle-pgrp.test.ts are
+// untouched by the move.
+import {
+  killPgrp,
+  killPgrpDescendants,
+  localProcessRuntime as workerRuntime,
+  type WorkerHandle,
+} from "./worker-runtime.js";
+export { killPgrp, killPgrpDescendants };
 import { mintWorkerToken, revokeWorkerToken } from "./worker-tokens.js";
 import { captureFor } from "../posthog.js";
 import { type ArchiveReason } from "@friday/shared";
@@ -76,12 +85,7 @@ import {
   sandboxExecAvailable,
   writeProfile,
 } from "./sandbox-profile.js";
-import type {
-  WorkerCommand,
-  WorkerEvent,
-  WorkerPromptCommand,
-  WorkerSpawnOptions,
-} from "./worker-protocol.js";
+import type { WorkerEvent, WorkerPromptCommand, WorkerSpawnOptions } from "./worker-protocol.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, "worker.js");
@@ -105,7 +109,7 @@ export interface ExitInfo {
 }
 
 export interface LiveWorker {
-  child: ChildProcess;
+  handle: WorkerHandle;
   /** Process-group id of the worker. With `detached: true` this equals
    * child.pid, which lets `kill(-pgid)` reap descendants the worker leaked
    * (e.g. `(sleep 200 &); disown`). In-memory only — not persisted, since
@@ -258,81 +262,6 @@ const live = new Map<string, LiveWorker>();
  */
 function isCurrentGeneration(w: LiveWorker): boolean {
   return live.get(w.agentName) === w;
-}
-
-/**
- * SIGTERM (or SIGKILL) the entire process group of a worker. With
- * `detached:true` at fork time, the worker's pgid is the same as its pid,
- * and `process.kill(-pgid, sig)` reaches every descendant — including
- * `(sleep 200 &); disown` style leaks that wouldn't be caught by killing
- * the worker pid alone. Safe to call even when the group is already gone;
- * ESRCH is swallowed.
- *
- * Exported only so the integration test can drive it directly against a
- * real subprocess tree.
- */
-export function killPgrp(pgid: number, signal: "SIGTERM" | "SIGKILL"): void {
-  if (!pgid || pgid <= 1) return;
-  try {
-    process.kill(-pgid, signal);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ESRCH" && code !== "EPERM") {
-      logger.log("warn", "worker.pgrp.kill.fail", {
-        pgid,
-        signal,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-}
-
-/**
- * Send a signal to every process in `pgid` EXCEPT the worker itself.
- * Used by `abortTurn` to kill in-flight tool subprocesses (the SDK CLI
- * subprocess + Bash et al. that it spawned) the instant Stop is pressed,
- * without taking down the worker — the worker stays alive long enough to
- * see the SDK iterator close, run its catch block (flushInflightBlocks),
- * and emit `turn-complete` cleanly. Returns the count of descendants
- * signaled, for log instrumentation + test assertion.
- *
- * Uses `pgrep -g <pgid>` to enumerate group members. Available on macOS
- * + Linux — matches Friday's deployment surface.
- *
- * Defensive: if pgrep is unavailable or returns nothing useful, return 0
- * and let the IPC + safety-net path do the work. Production correctness
- * does not depend on this helper succeeding; this is an aggressiveness
- * boost for the destructive-tool case.
- */
-export function killPgrpDescendants(
-  pgid: number,
-  workerPid: number,
-  signal: "SIGTERM" | "SIGKILL",
-): number {
-  if (!pgid || pgid <= 1 || !workerPid) return 0;
-  const out = spawnSync("pgrep", ["-g", String(pgid)], { encoding: "utf8" });
-  if (out.status !== 0 || typeof out.stdout !== "string") return 0;
-  const pids = out.stdout
-    .trim()
-    .split("\n")
-    .map((s) => Number.parseInt(s, 10))
-    .filter((n) => Number.isFinite(n) && n > 1 && n !== workerPid);
-  for (const pid of pids) {
-    try {
-      process.kill(pid, signal);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "ESRCH" && code !== "EPERM") {
-        logger.log("warn", "worker.descendant.kill.fail", {
-          pgid,
-          pid,
-          signal,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  }
-  return pids.length;
 }
 
 export interface SpawnTurnInput {
@@ -490,50 +419,20 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // Overridable via env for emergency tuning.
   const cpuLimit = process.env.FRIDAY_WORKER_CPU_LIMIT ?? "3600";
   const nofileLimit = process.env.FRIDAY_WORKER_NOFILE_LIMIT ?? "4096";
-  const ULIMIT_PRELUDE = `ulimit -t ${cpuLimit}; ulimit -n ${nofileLimit}; exec "$@"`;
 
-  const spawnOpts: SpawnOptions = {
-    stdio: ["ignore", "inherit", "inherit", "ipc"],
-    // M4: detached makes the worker its own process-group leader so we can
-    // SIGTERM the whole group on destroy. Without this, a leaked descendant
-    // (`(sleep 200 &); disown`) survives the worker exit.
-    detached: true,
+  // FRI-2037: spawn through the runtime seam. HOW a worker is started —
+  // detached process group, bash, sandbox-exec, ulimit — belongs to the local
+  // runtime; the daemon states WHAT it needs started.
+  const handle = workerRuntime.spawn({
+    workerPath: WORKER_PATH,
+    execArgv: process.execArgv,
     env,
-  };
-
-  // Both paths terminate in `bash -c 'ulimit …; exec "$@"' -- node <execArgv> WORKER`.
-  // The triple chain (sandbox-exec → bash → node) preserves NODE_CHANNEL_FD
-  // through both exec()s; verified by sandbox-profile-kernel.test.ts and
-  // lifecycle-spawn-ipc.test.ts.
-  //
-  // We forward `process.execArgv` so loader hooks on the parent (`--import
-  // tsx/esm` under `tsx watch`, `--experimental-vm-modules`, etc.) reach the
-  // worker too — otherwise the worker's plain `node WORKER_PATH` can't
-  // resolve `.ts` sources in dev. `fork()` does this implicitly; we have to
-  // do it ourselves now that we go through bash.
-  const nodeArgs = [...process.execArgv, WORKER_PATH];
-  const child: ChildProcess = wrapWithSandbox
-    ? spawn(
-        "/usr/bin/sandbox-exec",
-        [
-          "-f",
-          profilePath!,
-          "/bin/bash",
-          "-c",
-          ULIMIT_PRELUDE,
-          "--",
-          process.execPath,
-          ...nodeArgs,
-        ],
-        spawnOpts,
-      )
-    : spawn("/bin/bash", ["-c", ULIMIT_PRELUDE, "--", process.execPath, ...nodeArgs], spawnOpts);
-  // With detached:true the child is the leader of its own process group, so
-  // pgid === child.pid. If fork failed pid will be undefined; we keep 0 as
-  // a sentinel so killPgrp can skip safely.
-  const pgid = child.pid ?? 0;
+    limits: { cpuSeconds: cpuLimit, openFiles: nofileLimit },
+    ...(wrapWithSandbox && profilePath ? { sandboxProfilePath: profilePath } : {}),
+  });
+  const pgid = handle.pid;
   const w: LiveWorker = {
-    child,
+    handle,
     pgid,
     agentName: input.agentName,
     agentType: input.options.agentType,
@@ -606,7 +505,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     }
   };
 
-  child.on("message", (raw: unknown) => {
+  handle.onMessage((raw: unknown) => {
     void enqueueTransition(input.agentName, () => safeHandleEvent(w, raw));
   });
   // A failed `spawn()` (ENOENT — bad interpreter path, EMFILE — fd exhaustion)
@@ -615,7 +514,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // handler the worker stays in the live map and any external bookkeeping the
   // caller opened (the scheduler's `schedule_runs` row, ADR-024) leaks
   // `running` forever. Demote the Generation and fire `onExit` as `error`.
-  child.on("error", (err) => {
+  handle.onError((err) => {
     logger.log("warn", "worker.spawn.error", {
       agent: input.agentName,
       message: err instanceof Error ? err.message : String(err),
@@ -627,7 +526,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     if (isCurrentGeneration(w)) live.delete(input.agentName);
     fireOnExit("error");
   });
-  child.on("exit", (code, signal) => {
+  handle.onExit((code, signal) => {
     logger.log("info", "worker.exit", {
       agent: input.agentName,
       code,
@@ -709,7 +608,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // user-configured MCP servers from `~/.friday/config.json` here so callers
   // don't each have to remember to wire them; tests can pre-set
   // `input.options.userMcpServers` to bypass the disk read.
-  child.once("message", () => {
+  handle.onceMessage(() => {
     const userMcpServers = input.options.userMcpServers ?? loadConfig().mcpServers ?? [];
     // FRI-110: stamp the turn-start clock at the *actual* turn dispatch
     // (not at fork) so the stale-turn watchdog measures from when the
@@ -722,7 +621,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     // pinning it here keeps the three dispatch boundaries (construction,
     // spawn-fresh first turn, sendPrompt) structurally parallel.
     w.illegalTransitionsThisTurn = 0;
-    send(child, {
+    handle.send({
       type: "start",
       options: { ...input.options, userMcpServers },
     });
@@ -804,7 +703,7 @@ export function dispatchTurn(input: SpawnTurnInput): void {
     // iteration boundary. The worker emits `turn-complete` on the break;
     // our existing turn-complete handler then pops nextPrompts and sends
     // the queued prompt forward via the normal `prompt` IPC.
-    send(existing.child, { type: "prompts-pending" });
+    existing.handle.send({ type: "prompts-pending" });
     logger.log("info", "worker.prompt.queued", {
       agent: input.agentName,
       turnId: promptCmd.turnId,
@@ -1241,7 +1140,7 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
     agent: w.agentName,
     ts: Date.now(),
   });
-  send(w.child, { type: "prompt", options: p });
+  w.handle.send({ type: "prompt", options: p });
 }
 
 /**
@@ -1258,7 +1157,7 @@ export function __deleteLiveWorkerForTest(name: string): void {
   live.delete(name);
 }
 
-export function abortTurn(agentName: string): boolean {
+export async function abortTurn(agentName: string): Promise<boolean> {
   const w = live.get(agentName);
   if (!w) return false;
   w.abortRequested = true;
@@ -1285,7 +1184,7 @@ export function abortTurn(agentName: string): boolean {
     turnId: w.turnId,
     workerStatus: w.status,
   });
-  send(w.child, { type: "abort" });
+  w.handle.send({ type: "abort" });
   // FRI-145 M3: project the `aborting` Turn state via the machine. The abort
   // Transition returns no intents and writes no durable Status projection (the
   // agents row stays `working` until the cooperative turn-complete/error or the
@@ -1308,8 +1207,8 @@ export function abortTurn(agentName: string): boolean {
   // the SDK iterator close (the CLI subprocess died) and runs the
   // catch arm's `flushInflightBlocks("aborted")` + emits
   // `turn-complete` cleanly.
-  const workerPid = w.child.pid ?? 0;
-  const descendantsKilled = killPgrpDescendants(w.pgid, workerPid, "SIGTERM");
+  const workerPid = w.handle.pid;
+  const descendantsKilled = await w.handle.terminateDescendants("SIGTERM");
   logger.log("info", "worker.abort.descendants-killed", {
     agent: w.agentName,
     turnId: w.turnId,
@@ -1481,9 +1380,13 @@ async function forceKillStuckWorker(
   // dispatchTurn forks fresh. The live entry is already gone (deleted up
   // front), so the SIGKILL fallback gates on the child still being alive
   // (no exit event yet) rather than on live-map presence.
-  killPgrp(w.pgid, "SIGTERM");
+  await w.handle.terminate("SIGTERM");
   setTimeout(() => {
-    if (w.child.exitCode === null && !w.child.killed) killPgrp(w.pgid, "SIGKILL");
+    // Gate the hard kill on the worker still being alive, so a worker that
+    // exited in the grace window is not signalled after the fact.
+    void (async () => {
+      if (await w.handle.isAlive()) await w.handle.terminate("SIGKILL");
+    })();
   }, 1_500).unref();
 }
 
@@ -1582,11 +1485,11 @@ async function drainLiveWorker(w: LiveWorker): Promise<WorkerPromptCommand[]> {
   // Ask the worker to stop gracefully, then wait for the actual exit
   // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
   // leaked; SIGKILL-on-pgrp at 7s is the hard floor.
-  send(w.child, { type: "stop" });
-  if (w.child.exitCode !== null || w.child.killed) {
+  w.handle.send({ type: "stop" });
+  if (!(await w.handle.isAlive())) {
     // Child is already gone, but descendants may still be running.
-    killPgrp(w.pgid, "SIGTERM");
-    setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
+    await w.handle.terminate("SIGTERM");
+    setTimeout(() => void w.handle.terminate("SIGKILL"), 2_000).unref();
     return drainedPrompts;
   }
 
@@ -1597,7 +1500,7 @@ async function drainLiveWorker(w: LiveWorker): Promise<WorkerPromptCommand[]> {
       done = true;
       resolve(drainedPrompts);
     };
-    w.child.once("exit", () => {
+    w.handle.onceExit(() => {
       // Even on clean child exit, send a pgrp SIGTERM to reap any leaked
       // descendants (`(sleep &); disown`). No-op if the group is empty.
       killPgrp(w.pgid, "SIGTERM");
@@ -1809,7 +1712,7 @@ export function stopTurnStallWatchdog(): void {
 export function wakeAgent(agentName: string): boolean {
   const w = live.get(agentName);
   if (!w) return false;
-  send(w.child, { type: "mail-wakeup" });
+  w.handle.send({ type: "mail-wakeup" });
   return true;
 }
 
@@ -1822,7 +1725,7 @@ export function wakeAgent(agentName: string): boolean {
 export function wakeAgentCritical(agentName: string): boolean {
   const w = live.get(agentName);
   if (!w) return false;
-  send(w.child, { type: "mail-wakeup-critical" });
+  w.handle.send({ type: "mail-wakeup-critical" });
   return true;
 }
 
@@ -2353,8 +2256,4 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // Already handled by the once() listener that sends `start`.
       break;
   }
-}
-
-function send(child: ChildProcess, cmd: WorkerCommand): void {
-  if (child.send) child.send(cmd);
 }
