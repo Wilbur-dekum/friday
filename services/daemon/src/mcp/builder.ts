@@ -25,7 +25,7 @@ import type {
 import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { logger } from "../log.js";
-import { hostedServerPath } from "./host.js";
+import { hostedServerPath, type HostedServerName } from "./host.js";
 import { getResolvedShellEnv } from "../shell-env.js";
 import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
@@ -91,6 +91,31 @@ export function useHostedMcp(env: NodeJS.ProcessEnv = process.env): boolean {
   return !(raw === "0" || raw === "false");
 }
 
+/**
+ * FRI-2037: point a server at the daemon-hosted endpoint, or build it
+ * in-process when the escape hatch is set.
+ *
+ * `fallback` is a thunk so the in-process server is only CONSTRUCTED when it
+ * is actually used — otherwise every hosted server would still be built in the
+ * worker, which is the cost this change exists to remove.
+ */
+function hostedOr(
+  name: HostedServerName,
+  opts: BuildMcpServersOptions,
+  fallback: () => McpSdkServerConfigWithInstance,
+): McpHttpServerConfig | McpSdkServerConfigWithInstance {
+  if (!useHostedMcp()) return fallback();
+  return {
+    type: "http",
+    url: `${resolveDaemonBaseUrl(opts.daemonPort)}${hostedServerPath(name)}`,
+    headers: {
+      [DAEMON_SECRET_HEADER]: getDaemonSecret(),
+      "x-friday-caller-name": opts.callerName,
+      "x-friday-caller-type": opts.callerType,
+    },
+  };
+}
+
 export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServers {
   const servers: AssembledMcpServers = {};
   const ctx = {
@@ -103,11 +128,11 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
 
   // Echo stays for now as a sanity check; remove once the rest of the surface
   // is reliable.
-  servers[ECHO_SERVER_NAME] = buildEchoServer();
+  servers[ECHO_SERVER_NAME] = hostedOr(ECHO_SERVER_NAME, opts, () => buildEchoServer());
 
   // Every agent type can send/receive mail. Mail is the universal delivery
   // primitive (FIX_FORWARD 2.1/2.2); there is no separate `chat_reply` tool.
-  servers[MAIL_SERVER_NAME] = buildMailServer(ctx);
+  servers[MAIL_SERVER_NAME] = hostedOr(MAIL_SERVER_NAME, opts, () => buildMailServer(ctx));
 
   // agent_create / agent_list / agent_archive / etc.: orchestrator + builder +
   // helper + bare (ADR-022; `bare` added by FRI-16 — the spawn matrix permits
@@ -170,22 +195,16 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     // in-process form, so a regression is one env var away from being
     // bisected rather than a revert. Remove the flag once the rest of the
     // surface has moved.
-    servers[TICKETS_SERVER_NAME] = useHostedMcp()
-      ? {
-          type: "http",
-          url: `${resolveDaemonBaseUrl(opts.daemonPort)}${hostedServerPath(TICKETS_SERVER_NAME)}`,
-          headers: {
-            [DAEMON_SECRET_HEADER]: getDaemonSecret(),
-            "x-friday-caller-name": opts.callerName,
-            "x-friday-caller-type": opts.callerType,
-          },
-        }
-      : buildTicketsServer(ctx);
+    servers[TICKETS_SERVER_NAME] = hostedOr(TICKETS_SERVER_NAME, opts, () =>
+      buildTicketsServer(ctx),
+    );
   }
 
   // friday-schedule: orchestrator only.
   if (opts.callerType === "orchestrator") {
-    servers[SCHEDULE_SERVER_NAME] = buildScheduleServer(ctx);
+    servers[SCHEDULE_SERVER_NAME] = hostedOr(SCHEDULE_SERVER_NAME, opts, () =>
+      buildScheduleServer(ctx),
+    );
   }
 
   // friday-reminder: ALL caller types. Reminders are user-facing chat
@@ -218,13 +237,13 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // friday-evolve: orchestrator only. Sub-agents shouldn't be applying or
   // dismissing proposals — the meta-agent surfaces them via the orchestrator.
   if (opts.callerType === "orchestrator") {
-    servers[EVOLVE_SERVER_NAME] = buildEvolveServer(ctx);
+    servers[EVOLVE_SERVER_NAME] = hostedOr(EVOLVE_SERVER_NAME, opts, () => buildEvolveServer(ctx));
   }
 
   // friday-apps: orchestrator only. App install/uninstall/reload + listing.
   // Sub-agents under an app can't pull the rug out from under themselves.
   if (opts.callerType === "orchestrator") {
-    servers[APPS_SERVER_NAME] = buildAppsServer(ctx);
+    servers[APPS_SERVER_NAME] = hostedOr(APPS_SERVER_NAME, opts, () => buildAppsServer(ctx));
   }
 
   // friday-inbox: orchestrator only (FRI-171). Reads + acts on the stateless-
@@ -232,7 +251,7 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // triage Captures — that's the orchestrator's job, at Seth's explicit
   // direction. Ordinary tools: NO timer/cron drives them (build contract §1).
   if (opts.callerType === "orchestrator") {
-    servers[INBOX_SERVER_NAME] = buildInboxServer(ctx);
+    servers[INBOX_SERVER_NAME] = hostedOr(INBOX_SERVER_NAME, opts, () => buildInboxServer(ctx));
   }
 
   // friday-integrations: every non-archived agent type. Cross-system imports
@@ -240,7 +259,9 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // so a builder can file a Linear follow-up directly instead of routing
   // every external write through the orchestrator. Gracefully no-ops if the
   // relevant API key isn't set on the daemon.
-  servers[INTEGRATIONS_SERVER_NAME] = buildIntegrationsServer(ctx);
+  servers[INTEGRATIONS_SERVER_NAME] = hostedOr(INTEGRATIONS_SERVER_NAME, opts, () =>
+    buildIntegrationsServer(ctx),
+  );
 
   // friday-elicitation: ask_user tool (FRI-152). Every agent that may need
   // to surface a structured prompt to Seth — orchestrator and bare types,
