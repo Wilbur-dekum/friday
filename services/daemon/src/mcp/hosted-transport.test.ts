@@ -1,7 +1,12 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { handleHostedMcp, isHostedServer, type HostedServerName } from "./host.js";
+import {
+  handleHostedMcp,
+  hostedServerNames,
+  isHostedServer,
+  type HostedServerName,
+} from "./host.js";
 
 /**
  * FRI-2074: exercise every hosted server over a REAL MCP transport.
@@ -19,20 +24,8 @@ import { handleHostedMcp, isHostedServer, type HostedServerName } from "./host.j
  * change when the servers moved.
  */
 
-const SERVERS: HostedServerName[] = [
-  "friday-agents",
-  "friday-apps",
-  "friday-echo",
-  "friday-evolve",
-  "friday-habit",
-  "friday-inbox",
-  "friday-integrations",
-  "friday-mail",
-  "friday-memory",
-  "friday-reminder",
-  "friday-schedule",
-  "friday-tickets",
-] as unknown as HostedServerName[];
+// Derived from HOSTED, so a newly hosted server is exercised automatically.
+const SERVERS: HostedServerName[] = hostedServerNames();
 
 let server: Server | undefined;
 

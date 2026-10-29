@@ -1,6 +1,22 @@
 /**
- * Friday-secrets MCP server (ADR-038). In-process; caller identity comes
- * from trusted worker spawn options, not HTTP headers.
+ * Friday-secrets MCP server (ADR-038).
+ *
+ * FRI-2075: hosted daemon-side. The previous header said "In-process; caller
+ * identity comes from trusted worker spawn options, not HTTP headers" — that
+ * was accurate and is now obsolete in both halves.
+ *
+ * Identity comes from the per-worker bearer token the daemon minted, not from
+ * headers the caller sets for itself, so it is stronger than the spawn-options
+ * story it replaces. `appId` — which decides WHICH App's secrets are reachable
+ * — rides that same token (FRI-2037), so a worker cannot name another App's
+ * scope.
+ *
+ * And the authorization decision below (`canFetchOnDemand`, `isSecretsLocked`)
+ * now runs in the DAEMON rather than inside the worker. In-process, those
+ * checks executed in the same V8 isolate as untrusted repository code — the
+ * deferred "daemon-side enforcement plane" of docs/sandbox.md residual risk #1,
+ * on the tool surface where it matters most. A compromised worker can still
+ * ASK for a secret; it can no longer rewrite the code that decides.
  */
 
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
