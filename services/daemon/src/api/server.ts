@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { z } from "zod";
-import { handleRequest, matchRoute, type RouteRow, type RouterDeps } from "./router.js";
+import { handleRequest, matchRoute, writeJson, type RouteRow, type RouterDeps } from "./router.js";
 import { logger } from "../log.js";
 import { eventBus, getBootId, getBootTs } from "../events/bus.js";
 import {
@@ -166,6 +166,7 @@ import { reportPresence } from "../notifications/presence.js";
 import { notify } from "../notifications/notify.js";
 import type { PushSubscribePayload, PresenceReport, NotifyEventType } from "@friday/shared";
 import { NOTIFY_EVENT_TYPES } from "@friday/shared";
+import { callerFromHeaders, handleHostedMcp, isHostedServer } from "../mcp/host.js";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -311,6 +312,33 @@ export const ROUTES: RouteRow[] = [
     raw: async (ctx) => {
       const body = await readJson<{ command: string; args?: string }>(ctx.req);
       return handleSystemCommand(ctx.res, body, ctx.cfg);
+    },
+  },
+
+  // --- Friday's own MCP servers, hosted daemon-side (FRI-2037) ---
+  // Raw: the MCP streamable transport owns req/res for the exchange. Auth is
+  // the same `authorizeSameHost` gate as every other worker-facing route —
+  // daemon secret + loopback Host. See mcp/host.ts for why the auth model is
+  // deliberately unchanged in this slice.
+  {
+    method: "POST",
+    match: /^\/api\/mcp\/[a-z0-9-]+$/,
+    auth: true,
+    raw: async (ctx) => {
+      const name = ctx.path.slice("/api/mcp/".length);
+      if (!isHostedServer(name)) {
+        writeJson(ctx.res, 404, { error: `unknown MCP server: ${name}` });
+        return;
+      }
+      const caller = callerFromHeaders(ctx.req.headers, resolveDaemonPort(ctx.cfg));
+      if (!caller) {
+        writeJson(ctx.res, 400, {
+          error: "x-friday-caller-name and a valid x-friday-caller-type are required",
+        });
+        return;
+      }
+      const body = await readJson<unknown>(ctx.req);
+      await handleHostedMcp({ server: name, caller, req: ctx.req, res: ctx.res, body });
     },
   },
 

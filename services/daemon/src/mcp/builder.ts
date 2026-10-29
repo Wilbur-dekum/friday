@@ -9,14 +9,23 @@
  */
 
 import type { AgentType, ManifestMcpServer, McpServerConfig } from "@friday/shared";
-import { buildSubstitutionMap, collectRefsFromEnvRecords, isSecretsLocked } from "@friday/shared";
+import {
+  buildSubstitutionMap,
+  collectRefsFromEnvRecords,
+  DAEMON_SECRET_HEADER,
+  getDaemonSecret,
+  isSecretsLocked,
+  resolveDaemonBaseUrl,
+} from "@friday/shared";
 import type {
   McpSdkServerConfigWithInstance,
+  McpHttpServerConfig,
   McpStdioServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { logger } from "../log.js";
+import { hostedServerPath } from "./host.js";
 import { getResolvedShellEnv } from "../shell-env.js";
 import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
@@ -63,8 +72,24 @@ export interface BuildMcpServersOptions {
 
 export type AssembledMcpServers = Record<
   string,
-  McpSdkServerConfigWithInstance | McpStdioServerConfig
+  // FRI-2037: `http` joins the union because Friday's own servers are moving
+  // to daemon-hosted endpoints. `sdk` stays for the in-process legacy form
+  // (and the FRIDAY_MCP_HOSTED escape hatch); `stdio` is user-configured
+  // servers and Apps, which are unaffected by this work.
+  McpSdkServerConfigWithInstance | McpStdioServerConfig | McpHttpServerConfig
 >;
+
+/**
+ * FRI-2037: whether Friday's own MCP servers are served by the daemon over
+ * HTTP (default) or constructed in-process inside the worker (legacy).
+ *
+ * Defaults ON. The escape hatch exists so the pilot can be bisected without a
+ * revert; it is not a supported configuration and goes away with the flag.
+ */
+export function useHostedMcp(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.FRIDAY_MCP_HOSTED;
+  return !(raw === "0" || raw === "false");
+}
 
 export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServers {
   const servers: AssembledMcpServers = {};
@@ -135,7 +160,27 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     opts.callerType === "builder" ||
     opts.callerType === "helper"
   ) {
-    servers[TICKETS_SERVER_NAME] = buildTicketsServer(ctx);
+    // FRI-2037 pilot: tickets is served by the DAEMON over HTTP rather than
+    // constructed in-process here. Same `buildTicketsServer` code, same tool
+    // definitions — it just runs on the other side of the boundary, which is
+    // what gets the tool surface out of the process running untrusted
+    // repository code (docs/sandbox.md residual risk #1).
+    //
+    // Opt-in while it is a pilot: `FRIDAY_MCP_HOSTED=0` restores the
+    // in-process form, so a regression is one env var away from being
+    // bisected rather than a revert. Remove the flag once the rest of the
+    // surface has moved.
+    servers[TICKETS_SERVER_NAME] = useHostedMcp()
+      ? {
+          type: "http",
+          url: `${resolveDaemonBaseUrl(opts.daemonPort)}${hostedServerPath(TICKETS_SERVER_NAME)}`,
+          headers: {
+            [DAEMON_SECRET_HEADER]: getDaemonSecret(),
+            "x-friday-caller-name": opts.callerName,
+            "x-friday-caller-type": opts.callerType,
+          },
+        }
+      : buildTicketsServer(ctx);
   }
 
   // friday-schedule: orchestrator only.
