@@ -947,14 +947,26 @@ Second, and the hard one: `ask_user` is a round trip to a human, not
 request/response. The daemon exposes a long-poll (`POST /api/elicitation/wait`)
 plus a submit route, and the tool blocks until the user answers.
 
-Settle, do not assume: does a long-poll survive the hosted transport?
-`host.ts` runs StreamableHTTP **stateless**, a fresh transport per request, so
-a call blocking for minutes holds that request open — check it against server
-and proxy timeouts. And FRI-2037 established that abort reaches a hosted
-handler by CONNECTION CLOSE, not `notifications/cancelled` (stateless cannot
-correlate one), so a user pressing Stop mid-elicitation must close the request
-or every cancelled question leaks a handle. `host-abort.test.ts` is the model
-for proving it.
+**MEASURED: it cannot be hosted as written.** Hosted, every `ask_user` fails
+with `ask_user invoked without a tool_use_id`. The elicitation id IS
+`extra.toolUseId` — the value the dashboard SSE event, the submit POST and the
+canonical `tool_use` block all key on. `createSdkMcpServer` injects it because
+it runs in-process; the standard MCP transport's `extra` carries `requestId`
+and `signal` but no `toolUseId`, because tool_use_id is an Anthropic-API
+concept rather than an MCP one. Not a port — it needs a different correlation
+identity, and whatever replaces it has to reach all three consumers.
+
+The long-poll was NOT the blocker, contrary to this ticket's original guess.
+Node's `requestTimeout` governs request RECEIPT, not response latency: a probe
+held a fully-received request open past a 2s `requestTimeout` and was never
+closed. The 300s default reads like a ceiling and is not one.
+
+Three options, none obviously right: thread the tool_use_id over the wire
+(does the Agent SDK populate anything correlatable on a remote call?); mint the
+id daemon-side and re-key the dashboard, submit route and chat store; or leave
+this server in-process permanently and handle its container reachability under
+FRI-2072. The last is cheap and may simply be correct — elicitation is the one
+tool whose whole purpose is a round trip to a human.
 
 ### FRI-2075 — Host `friday-secrets` daemon-side
 
