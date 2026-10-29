@@ -167,6 +167,7 @@ import { notify } from "../notifications/notify.js";
 import type { PushSubscribePayload, PresenceReport, NotifyEventType } from "@friday/shared";
 import { NOTIFY_EVENT_TYPES } from "@friday/shared";
 import { callerFromRequest, handleHostedMcp, isHostedServer } from "../mcp/host.js";
+import { isRepoAllowed, resolveRepoAllowlist } from "../agent/repo-allowlist.js";
 import {
   isWorkerFacing,
   resolveWorkerListen,
@@ -2274,6 +2275,29 @@ async function createAgent(
   let builderRepo: string | undefined;
   if (body.type === "builder") {
     const repo = body.worktree?.repo ?? process.cwd();
+
+    // FRI-2041: authorize the REPO, not just the worktree location.
+    // `assertInsideWorkspacesRoot` answers where a worktree may live;
+    // nothing asked which repository it may be cut from, so any caller who
+    // could spawn a Builder could point it at any repo the daemon can reach.
+    const allowlist = resolveRepoAllowlist();
+    if (!allowlist) {
+      // Permissive when unconfigured — a deny-by-default upgrade would break
+      // every existing builder spawn — but never silently. Same shape as the
+      // sandbox announcing it is unavailable (FRI-2062).
+      logger.log("warn", "builder.repo.allowlist.absent", {
+        agent: body.name,
+        repo,
+        note: "any reachable repo may back a Builder; set FRIDAY_REPO_ALLOWLIST to bound it",
+      });
+    } else if (!isRepoAllowed(repo, allowlist)) {
+      logger.log("warn", "builder.repo.denied", { agent: body.name, repo });
+      return {
+        status: 403,
+        body: { error: `repository not permitted for Builders: ${repo}` },
+      };
+    }
+
     builderRepo = repo;
     branch = body.worktree?.branch ?? `friday/${body.name}`;
     try {
