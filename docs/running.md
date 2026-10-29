@@ -145,6 +145,41 @@ Then compare row counts on both sides. `CENSUS_TABLES` in `packages/shared/src/d
 
 A surplus counts as a mismatch too — a restore should reproduce the source exactly, and extra rows mean the target was not empty.
 
+### The development container
+
+Work that needs a git toolchain in the production runtime runs in a separate
+container type, behind a compose profile so it can never start alongside the
+Deployment:
+
+```bash
+docker compose --profile dev run --rm dev            # a shell
+docker compose --profile dev run --rm \
+  -e GH_TOKEN -e GIT_AUTHOR_NAME -e GIT_AUTHOR_EMAIL dev gh pr list
+```
+
+It is the `dev` stage of the same Dockerfile — `FROM runtime` plus `gh` — so
+the Deployment image is a literal prefix of it and the two cannot drift. The
+repo is bind-mounted at `/workspace`, with an anonymous volume masking
+`node_modules` so the host's **darwin** native addons never leak into a linux
+container.
+
+**The Deployment does not get this toolchain, and must not.** A Deployment has
+no business holding git credentials; FRI-2062 removed a cluster superuser from
+it for the same reason, and a builder inside it can read the vault. Credentials
+here are passed per-invocation — nothing is baked into the image, nothing sits
+on a long-running service.
+
+**`target:` is load-bearing.** `dev` is the last stage in the Dockerfile (it has
+to be, being `FROM runtime`), and Docker's default target is the last stage —
+so the `friday` service pins `target: runtime`. Without it the Deployment
+silently builds as the dev image, `gh` and all. Any new build site for this
+image must name its target.
+
+Friday cannot spawn this container itself: workers are processes, and the
+worker boundary becomes a container lifecycle in FRI-2037. This is the proving
+ground for FRI-2038's per-task builder containers, operated by a human until
+then.
+
 ### Cutting a real install over (the whole-machine migration)
 
 Moving an existing Friday onto a Deployment is a superset of the database move above, and the database is the part that goes right on its own. Measured end to end on the first real cutover:

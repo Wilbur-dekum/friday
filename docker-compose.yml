@@ -81,7 +81,15 @@ services:
       caddy reverse-proxy --from http://friday.localhost --to friday:7615
 
   friday:
-    build: .
+    # `target: runtime` is LOAD-BEARING, not tidiness. Docker defaults to the
+    # LAST stage in the Dockerfile, and `dev` is defined after `runtime`
+    # (it has to be — it is `FROM runtime`). Without this the Deployment
+    # silently builds the dev image: verified, `gh` present and
+    # FRIDAY_DEV_CONTAINER=1 on the service customers run. Every build site
+    # for this image must name its target explicitly.
+    build:
+      context: .
+      target: runtime
     # FRI-2006: run an init process (tini) as PID 1 in front of the supervisor.
     #
     # Node does not reap orphaned grandchildren. Measured: orphaning four
@@ -177,6 +185,61 @@ services:
       # SDK session transcripts live outside FRIDAY_DATA_DIR; without a volume
       # every Conversation silently starts fresh on each deploy (FRI-2007).
       - friday-home:/home/friday
+
+  # FRI-2071: the development container type. NOT part of `docker compose up` —
+  # it sits behind a profile so it can never start alongside the Deployment.
+  #
+  #   docker compose --profile dev run --rm dev bash
+  #
+  # Same image lineage as the Deployment (`target: dev` is `FROM runtime` plus
+  # `gh`), so anything verified here runs on the artifact customers get. That
+  # is the point: a dev image that diverges reinstates the "works in dev"
+  # blindness the FRI-2014 cutover spent four defects proving is real.
+  dev:
+    build:
+      context: .
+      target: dev
+    profiles: ["dev"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://friday:friday@postgres:5432/friday
+      ZERO_UPSTREAM_DB: postgresql://friday:friday@postgres:5432/friday
+      ZERO_REPLICA_FILE: /data/zero/replica.db
+      FRIDAY_DATA_DIR: /data
+      BETTER_AUTH_URL: http://friday.localhost
+      # Pass-through (null), never literals: set in YOUR shell for the
+      # invocation that needs them, so nothing is baked into the image and
+      # nothing lands on a long-running service. GH_TOKEN wants a token scoped
+      # to this repo — FRI-2041 makes per-task single-repo tokens the real
+      # mechanism; until then scope it by hand and keep it short-lived.
+      GH_TOKEN:
+      GIT_AUTHOR_NAME:
+      GIT_AUTHOR_EMAIL:
+      GIT_COMMITTER_NAME:
+      GIT_COMMITTER_EMAIL:
+      # The superuser, for `friday restore` / provisioning only. Set it per
+      # invocation; see the note on the `friday` service above (FRI-2062).
+      FRIDAY_ADMIN_DATABASE_URL:
+    volumes:
+      # The working tree, so builds and tests run against live source in the
+      # production runtime rather than a copy baked at image-build time.
+      - .:/workspace
+      # Mask the host's node_modules. The bind mount above would otherwise
+      # carry DARWIN native addons (better-sqlite3, @rocicorp/zero-sqlite3,
+      # esbuild, sharp) into a linux container, where they fail to load in
+      # ways that read like real bugs. An anonymous volume shadows the path;
+      # `pnpm install` inside the container fills it with linux builds.
+      # /app keeps its own, already-correct tree either way.
+      - /workspace/node_modules
+      # Same Deployment state the `friday` service uses, which is what makes
+      # `friday restore` / `friday doctor` meaningful from here. Both writing
+      # at once is a hazard — this is `run --rm`, not a second long-lived
+      # service, and the profile keeps `up` from starting it.
+      - friday-data:/data
+      - friday-home:/home/friday
+    working_dir: /workspace
 
 volumes:
   pgdata:

@@ -129,3 +129,72 @@ VOLUME ["/data", "/home/friday"]
 EXPOSE 7615
 
 ENTRYPOINT ["node", "packages/cli/dist/bin/supervisor.js"]
+
+# ---- dev --------------------------------------------------------------------
+# !! THIS IS THE LAST STAGE, SO IT IS DOCKER'S DEFAULT TARGET. !!
+# Any build of this Dockerfile that does not name a target gets THIS image,
+# not `runtime`. docker-compose.yml's `friday` service therefore pins
+# `target: runtime` explicitly. Caught the hard way: adding this stage
+# silently rebuilt the Deployment as the dev image — `gh` present,
+# FRIDAY_DEV_CONTAINER=1, on the service customers run. If you add a stage
+# after this one, re-check every build site.
+#
+# A development container type (FRI-2071), for work that needs a git toolchain
+# in the production runtime. NOT the image a Deployment runs.
+#
+# STRICTLY ADDITIVE over `runtime`, and that is the whole design constraint.
+# `FROM runtime` means prod is a literal prefix of dev: same base, same
+# node_modules, same resolution. Parity cannot drift, because there is nothing
+# to drift — dev is prod plus two packages.
+#
+# Why not simply add `gh` to the runtime stage: a Deployment has no business
+# holding a git toolchain or the credentials to use one. FRI-2062 removed a
+# cluster superuser from the Deployment for the same reason, and a builder in
+# that container can read the vault (accepted residual risk, until FRI-2038).
+#
+# Why not run the daily driver on THIS image: ADR-050's one-image invariant is
+# self-enforcing only while the daily driver runs the shipped artifact. The
+# FRI-2014 cutover found four defects that dev had masked for weeks; pointing
+# the daily driver at a dev image reinstates exactly that blindness.
+#
+# This is the proving ground for FRI-2038's per-task builder containers. Friday
+# cannot spawn it yet — workers are processes, and the worker boundary becomes
+# a container lifecycle in FRI-2037. Until then it is operated by a human:
+#
+#   docker compose --profile dev run --rm dev bash
+#
+# Credentials are passed per-invocation, never baked and never on the
+# long-running service — see docker-compose.yml's `dev` service.
+FROM runtime AS dev
+
+USER root
+
+# `gh` from the official apt repo rather than a release tarball: the repo is
+# arch-aware, and the image is built per-arch anyway (no cross-compile, see the
+# header). `less` because `gh` pages its output and errors without a pager.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl ca-certificates less \
+  && install -d -m 0755 /etc/apt/keyrings \
+  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends gh \
+  && apt-get purge -y curl && apt-get autoremove -y \
+  && rm -rf /var/lib/apt/lists/*
+
+USER node
+
+# Marks the toolchain container in logs and lets code branch on it if it ever
+# must. Deliberately NOT a second truth about containerization — FRIDAY_CONTAINER
+# stays 1 (inherited), so isContainer() is unaffected.
+ENV FRIDAY_DEV_CONTAINER=1
+
+# Reset the inherited ENTRYPOINT. `runtime` sets it to the supervisor, which
+# would turn `docker compose run dev <cmd>` into "start the stack, with <cmd>
+# as argv" rather than running <cmd>. A toolchain container defaults to a
+# shell; start the stack from the `friday` service, which is its job.
+ENTRYPOINT []
+CMD ["bash"]
