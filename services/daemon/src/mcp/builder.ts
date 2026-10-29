@@ -167,7 +167,7 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
 
   // friday-memory: every caller. Builders get a read-only filtered subset
   // (handled inside buildMemoryServer based on callerType).
-  servers[MEMORY_SERVER_NAME] = buildMemoryServer(ctx);
+  servers[MEMORY_SERVER_NAME] = hostedOr(MEMORY_SERVER_NAME, opts, () => buildMemoryServer(ctx));
 
   // friday-secrets: on-demand fetch for orchestrator/builder/helper/bare (ADR-038).
   // Scheduled + planner are excluded — headless leaves without secret disclosure.
