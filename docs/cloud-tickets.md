@@ -919,11 +919,31 @@ This corrects an assumption recorded in FRI-2037's PR #24, which framed
 hits. True for the 22 gated routes; for the other 62 there is no wall, because
 there is no check. Sharper, not milder.
 
-Order matters: decide what the Deployment-internal network is, audit the 62,
-and only then bind wider. Binding first leaves a window where the whole surface
-is exposed to the worker container. The FRI-2037 per-worker token is the
-credential this needs; what is missing is applying it to the routes a
-token-bearing worker will call.
+**RESOLVED, but not by the audit this entry described.** Measuring first
+changed the answer: the worker needs FOUR route patterns, not sixty-two.
+Hosting thirteen of fourteen MCP servers daemon-side collapsed the surface —
+those handlers now self-call and never cross a network. What remains is
+`POST /api/mcp/<server>`, `GET /api/memory`, `GET /api/mail/inbox/<agent>` and
+`POST /api/elicitation/wait`.
+
+So: a **second listener**, off unless `FRIDAY_WORKER_LISTEN` is set, serving
+only those four behind a per-worker token. The primary listener keeps all 84
+routes on loopback, unchanged. The limit is structural rather than policy — a
+route is unreachable from the worker network because it is not served there,
+and a route added tomorrow is loopback-only by default. Non-allowlisted paths
+return 404, not 403.
+
+The shared daemon secret is refused on that listener: it sits on a volume any
+builder can read (FRI-2062), so across a network boundary it identifies
+nothing.
+
+**What this does not do:** it does not gate the other 62. They remain
+loopback-only, which is sound while nothing else is on that interface — this
+removed the REASON to bind the primary listener wider, not the underlying
+exposure. Whoever picks up FRI-2038 should keep that distinction.
+
+See `docs/running.md` § "The worker-facing listener" for the measured
+behaviour from a second container.
 
 ### FRI-2073 — Host `friday-memory` daemon-side
 

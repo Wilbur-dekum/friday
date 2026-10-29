@@ -224,6 +224,57 @@ The container runs `tini` as PID 1 (`init: true`) with the supervisor beneath it
 
 `friday status` still works and is the way to ask "is this running?" — it probes the stack instead of asking launchd, and reports `supervisor up … (container-managed)`.
 
+### The worker-facing listener
+
+The daemon binds `127.0.0.1`, and that bind is doing more work than it looks:
+**62 of its 84 routes carry no auth flag at all**, because the router's own
+comment says they "rely on the 127.0.0.1 binding + injected daemon secret
+instead". Verified — `GET /api/tickets` with `Host: evil.example` and the
+daemon secret returns 200. The bind is not a weak control, it is a total one.
+
+FRI-2038 needs a worker in its own container to reach the daemon, which means
+binding beyond loopback. Doing that on the existing listener would expose all
+84 routes to the one network the untrusted-code container sits on.
+
+So there is a **second listener**, off unless `FRIDAY_WORKER_LISTEN` is set
+(e.g. `0.0.0.0:7611`). It serves only `WORKER_FACING_ROUTES` — four patterns —
+and every request needs a per-worker bearer token:
+
+| Route                         | Why a worker needs it                            |
+| ----------------------------- | ------------------------------------------------ |
+| `POST /api/mcp/<server>`      | the hosted MCP servers its SDK connects to       |
+| `GET /api/memory`             | `compact-flush` reads the index to bound a flush |
+| `GET /api/mail/inbox/<agent>` | `fetchInboxQuiet` drains mail at turn start      |
+| `POST /api/elicitation/wait`  | the one MCP server that cannot be hosted         |
+
+The list is short because hosting thirteen of fourteen MCP servers daemon-side
+collapsed the worker→daemon surface: those handlers now self-call and never
+cross a network.
+
+**The limit is structural, not policy.** A route is unreachable from the worker
+network because it is not served there — not because a check said no. A route
+added tomorrow is loopback-only by default, which is the safe direction. From
+a second container, measured:
+
+```
+friday:7610  (daemon)            ECONNREFUSED
+friday:7611  (worker listener)   401        ← reachable, token required
+GET /api/memory                  401        ← allowlisted, needs a token
+GET /api/tickets                 404        ← not served here
+GET /api/memory/secret           404        ← no prefix matching
+POST /api/memory                 404        ← method-specific
+```
+
+Non-allowlisted routes return **404, not 403**: a route that is not served
+should look absent rather than forbidden, with no confirmation of what else
+the daemon runs.
+
+The token is the per-worker credential from FRI-2037 — minted at spawn,
+revoked on exit, impossible for the worker to forge. The shared daemon secret
+is deliberately NOT accepted here: it sits on a volume any builder in the
+Deployment container can read, so across a network boundary it identifies
+nothing.
+
 ### Hostname and the reverse proxy
 
 The stack runs behind a Caddy reverse proxy on **<http://friday.localhost>**, not bare `localhost:7615`. That is deliberate: BetterAuth derives absolute URLs, the CSRF origin list and the session cookie's `Secure`/`__Secure-` prefix from its `baseURL`, and **hard-exits** when a configured public URL is not among `trustedOrigins`. Exercising a real hostname in dev is the only way to meet that before a Deployment does.

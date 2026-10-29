@@ -167,6 +167,12 @@ import { notify } from "../notifications/notify.js";
 import type { PushSubscribePayload, PresenceReport, NotifyEventType } from "@friday/shared";
 import { NOTIFY_EVENT_TYPES } from "@friday/shared";
 import { callerFromRequest, handleHostedMcp, isHostedServer } from "../mcp/host.js";
+import {
+  isWorkerFacing,
+  resolveWorkerListen,
+  workerFromRequest,
+  WORKER_FACING_ROUTES,
+} from "./worker-listener.js";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -181,7 +187,60 @@ export function startServer(opts: StartServerOptions) {
   const server = createServer((req, res) => handle(req, res, cfg));
   server.listen(opts.port, "127.0.0.1");
   logger.log("info", "api.listening", { port: opts.port });
+
+  // FRI-2072: optional second listener for a containerised worker. Off unless
+  // `FRIDAY_WORKER_LISTEN` is set, so a laptop and a single-container
+  // Deployment are untouched — neither has a worker on a network.
+  //
+  // It serves ONLY `WORKER_FACING_ROUTES` and requires a per-worker token.
+  // That is deliberately structural: the other 80-odd routes are unreachable
+  // here because they are not served, not because a check said no, and a
+  // route added tomorrow is loopback-only by default.
+  const workerListen = resolveWorkerListen();
+  if (workerListen) {
+    const workerServer = createServer((req, res) => {
+      void handleWorkerFacing(req, res, cfg);
+    });
+    workerServer.listen(workerListen.port, workerListen.host);
+    logger.log("warn", "api.worker-listening", {
+      host: workerListen.host,
+      port: workerListen.port,
+      routes: WORKER_FACING_ROUTES.length,
+      note: "worker-facing surface is reachable off-loopback; token required",
+    });
+    // Tie its lifetime to the primary listener so shutdown stays one call and
+    // callers keep the same return type. A worker listener outliving the
+    // daemon's own shutdown would hold the port and keep a surface open.
+    server.on("close", () => workerServer.close());
+  }
   return server;
+}
+
+/**
+ * Request path for the worker-facing listener (FRI-2072).
+ *
+ * Two gates before anything else runs: the route must be on the allowlist, and
+ * the caller must present a valid per-worker token. Only then does it reach
+ * the same `handle` the loopback listener uses, so there is one implementation
+ * of every route rather than a divergent copy.
+ */
+async function handleWorkerFacing(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<void> {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  if (!isWorkerFacing(req.method, url.pathname)) {
+    // 404 rather than 403: a route that is not served here should look absent,
+    // not forbidden. No reason to confirm what else the daemon runs.
+    writeJson(res, 404, { error: "not found" });
+    return;
+  }
+  if (!workerFromRequest(req)) {
+    writeJson(res, 401, { error: "a valid per-worker bearer token is required" });
+    return;
+  }
+  await handle(req, res, cfg);
 }
 
 async function handle(
