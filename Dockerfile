@@ -126,6 +126,12 @@ VOLUME ["/data", "/home/friday"]
 # to 127.0.0.1 inside the container, which is what keeps `isLoopbackOrigin()`
 # and the daemon-secret `Host` check meaningful — see ADR-050 on why the stack
 # is one container and not three.
+# FRI-2072: a worker in its own container (FRI-2038) reaches the daemon
+# through the WORKER-FACING listener, not this one — a separate port serving
+# four allowlisted routes behind a per-worker token, enabled only when
+# FRIDAY_WORKER_LISTEN is set. See docs/running.md § "The worker-facing
+# listener". Not EXPOSEd here: it is for the Deployment's internal network,
+# never the host.
 EXPOSE 7615
 
 ENTRYPOINT ["node", "packages/cli/dist/bin/supervisor.js"]

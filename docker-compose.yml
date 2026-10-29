@@ -156,6 +156,11 @@ services:
       # other absolute host path in a migrated `.env` has the same hazard.
       # The replica is a cache, never canonical — it re-COPYs from Postgres.
       ZERO_REPLICA_FILE: /data/zero/replica.db
+      # FRI-2072: the worker-facing listener. Off by default everywhere; set
+      # here so the dev stack exercises the boundary FRI-2038 will depend on.
+      # Serves ONLY WORKER_FACING_ROUTES and requires a per-worker token —
+      # the other 80-odd routes stay loopback-only by construction.
+      FRIDAY_WORKER_LISTEN: 0.0.0.0:7611
       # FRI-2060: agent credentials. Headless by necessity — the CLI's
       # subscription OAuth needs an interactive login and a persisted
       # credential dir, which an unattended Deployment cannot do. An API key
