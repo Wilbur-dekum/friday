@@ -59,3 +59,48 @@ describe("hosted MCP caller derivation", () => {
     expect(callerFromRequest({ authorization: `bearer ${token}` }, 7610)?.callerName).toBe("a");
   });
 });
+
+/**
+ * FRI-2037: `parentName` and `appId` decide which App's reminders and secrets
+ * a caller reaches, and who it may spawn and mail. They must come from the
+ * mint — as self-asserted headers they would be a privilege escalation.
+ */
+describe("scoping values are derived, never asserted", () => {
+  beforeEach(() => __resetWorkerTokensForTest());
+  afterEach(() => __resetWorkerTokensForTest());
+
+  it("carries parentName and appId from the token", () => {
+    const token = mintWorkerToken({
+      callerName: "app-agent",
+      callerType: "helper",
+      parentName: "friday",
+      appId: "app-alpha",
+    });
+    expect(callerFromRequest({ authorization: `Bearer ${token}` }, 7610)).toMatchObject({
+      parentName: "friday",
+      appId: "app-alpha",
+    });
+  });
+
+  it("ignores a forged appId header — the escalation this closes", () => {
+    // A worker minted for app-alpha must not reach app-beta's reminders or
+    // secrets by naming it on the request.
+    const token = mintWorkerToken({
+      callerName: "app-agent",
+      callerType: "helper",
+      appId: "app-alpha",
+    });
+    const caller = callerFromRequest(
+      { authorization: `Bearer ${token}`, "x-friday-app-id": "app-beta" },
+      7610,
+    );
+    expect(caller?.appId).toBe("app-alpha");
+  });
+
+  it("leaves both undefined for a worker minted without them", () => {
+    const token = mintWorkerToken({ callerName: "friday", callerType: "orchestrator" });
+    const caller = callerFromRequest({ authorization: `Bearer ${token}` }, 7610);
+    expect(caller?.appId).toBeUndefined();
+    expect(caller?.parentName).toBeUndefined();
+  });
+});

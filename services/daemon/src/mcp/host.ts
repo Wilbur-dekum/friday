@@ -2,12 +2,15 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AgentType } from "@friday/shared";
 import { resolveWorkerToken } from "../agent/worker-tokens.js";
+import { buildAgentsServer, AGENTS_SERVER_NAME } from "./agents.js";
 import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
+import { buildHabitServer, HABIT_SERVER_NAME } from "./habit.js";
 import { buildInboxServer, INBOX_SERVER_NAME } from "./inbox.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
+import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
 
@@ -52,27 +55,24 @@ import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
 /**
  * Servers this host can serve, by MCP server name.
  *
- * Every entry here is built from nothing but the caller identity that arrives
- * on the request. Three Friday servers are deliberately ABSENT because they
- * need more than that, and "more than that" is an authority question rather
- * than a plumbing one:
+ * Every entry is built from the identity the daemon MINTED, never from
+ * anything the request asserts. That distinction is what let the last three
+ * join: `friday-agents` needs `parentName`, and `friday-reminder` /
+ * `friday-habit` need `appId` — scoping values that decide which App's
+ * reminders and secrets a caller reaches, and who it may spawn and mail. As
+ * self-asserted headers they would have been a privilege escalation; carried
+ * on the token they are simply derived.
  *
- *  - `friday-agents` needs `parentName`
- *  - `friday-reminder` and `friday-habit` need `appId`
- *
- * Both are per-worker scoping values the daemon currently derives itself. To
- * host them, the worker would have to ASSERT them over a header — and `appId`
- * scopes an App's reminders and (with `friday-secrets`) its secrets, so a
- * worker naming its own is a privilege decision. builder.ts already warns
- * against widening the shared ctx with these for the same reason. They move
- * when the caller is derived from a per-worker credential rather than claimed.
- *
- * Also absent and tracked separately: `friday-elicitation` (round-trips to the
- * user through a long-poll that has to survive the transport change),
- * `friday-secrets` (touches the age vault), `friday-memory` (has local work).
+ * Still absent, for reasons that are not about scoping:
+ * `friday-elicitation` (round-trips to the user through a long-poll that has
+ * to survive the transport change), `friday-secrets` (touches the age vault),
+ * `friday-memory` (has local work).
  */
 const HOSTED = {
+  [AGENTS_SERVER_NAME]: buildAgentsServer,
   [APPS_SERVER_NAME]: buildAppsServer,
+  [HABIT_SERVER_NAME]: buildHabitServer,
+  [REMINDER_SERVER_NAME]: buildReminderServer,
   [ECHO_SERVER_NAME]: () => buildEchoServer(),
   [EVOLVE_SERVER_NAME]: buildEvolveServer,
   [INBOX_SERVER_NAME]: buildInboxServer,
@@ -109,6 +109,9 @@ export interface HostedCaller {
   callerName: string;
   callerType: AgentType;
   daemonPort: number;
+  /** Derived from the mint, never from a header — see callerFromRequest. */
+  parentName?: string;
+  appId?: string;
 }
 
 const AGENT_TYPES: readonly string[] = [
@@ -154,6 +157,8 @@ export function callerFromRequest(
     callerName: identity.callerName,
     callerType: identity.callerType,
     daemonPort,
+    parentName: identity.parentName,
+    appId: identity.appId,
   };
 }
 
@@ -175,6 +180,10 @@ export async function handleHostedMcp(opts: {
     callerName: opts.caller.callerName,
     callerType: opts.caller.callerType,
     daemonPort: opts.caller.daemonPort,
+    // Only friday-agents / friday-reminder / friday-habit read these, and
+    // they come from the token the daemon minted — not from the request.
+    parentName: opts.caller.parentName,
+    appId: opts.caller.appId,
   });
 
   // `sessionIdGenerator: undefined` is the SDK's stateless mode: no session is

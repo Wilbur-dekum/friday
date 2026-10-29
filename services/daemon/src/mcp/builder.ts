@@ -155,12 +155,14 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     opts.callerType === "helper" ||
     opts.callerType === "bare"
   ) {
-    servers[AGENTS_SERVER_NAME] = buildAgentsServer({
-      callerName: opts.callerName,
-      callerType: opts.callerType,
-      daemonPort: opts.daemonPort,
-      parentName: opts.parentName,
-    });
+    servers[AGENTS_SERVER_NAME] = hostedOr(AGENTS_SERVER_NAME, opts, () =>
+      buildAgentsServer({
+        callerName: opts.callerName,
+        callerType: opts.callerType,
+        daemonPort: opts.daemonPort,
+        parentName: opts.parentName,
+      }),
+    );
   }
 
   // friday-memory: every caller. Builders get a read-only filtered subset
@@ -219,12 +221,14 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // sub-agents can emit idempotent, app-namespaced reminders — mirroring the
   // buildSecretsServer call above. Do NOT widen the shared `ctx`: that would
   // leak appId into mail/memory/tickets/etc.
-  servers[REMINDER_SERVER_NAME] = buildReminderServer({
-    callerName: opts.callerName,
-    callerType: opts.callerType,
-    daemonPort: opts.daemonPort,
-    appId: opts.appContext?.appId,
-  });
+  servers[REMINDER_SERVER_NAME] = hostedOr(REMINDER_SERVER_NAME, opts, () =>
+    buildReminderServer({
+      callerName: opts.callerName,
+      callerType: opts.callerType,
+      daemonPort: opts.daemonPort,
+      appId: opts.appContext?.appId,
+    }),
+  );
 
   // friday-habit: ALL caller types (FRI-169). The habit tracker is a CORE
   // feature — every app sub-agent + the orchestrator must be able to add,
@@ -232,12 +236,14 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // Threads the per-app context via an EXPLICIT options object (mirroring the
   // buildReminderServer/buildSecretsServer calls above). Do NOT widen the
   // shared `ctx`: that would leak appId into mail/memory/tickets/etc.
-  servers[HABIT_SERVER_NAME] = buildHabitServer({
-    callerName: opts.callerName,
-    callerType: opts.callerType,
-    daemonPort: opts.daemonPort,
-    appId: opts.appContext?.appId,
-  });
+  servers[HABIT_SERVER_NAME] = hostedOr(HABIT_SERVER_NAME, opts, () =>
+    buildHabitServer({
+      callerName: opts.callerName,
+      callerType: opts.callerType,
+      daemonPort: opts.daemonPort,
+      appId: opts.appContext?.appId,
+    }),
+  );
 
   // friday-evolve: orchestrator only. Sub-agents shouldn't be applying or
   // dismissing proposals — the meta-agent surfaces them via the orchestrator.

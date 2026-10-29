@@ -437,6 +437,13 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   const workerToken = mintWorkerToken({
     callerName: input.agentName,
     callerType: input.options.agentType,
+    // The two values a worker must never name for itself. `appId` scopes an
+    // App's reminders and secrets; `parentName` scopes who it may spawn and
+    // mail. The daemon already knows both at spawn, so they ride the mint and
+    // the worker never gets a say — which is what makes hosting
+    // friday-agents / friday-reminder / friday-habit safe.
+    parentName: input.options.parentName,
+    appId: input.options.appContext?.appId,
   });
 
   const env = {

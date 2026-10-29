@@ -2,6 +2,25 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { AgentType, McpServerConfig } from "@friday/shared";
 import { dirname, join } from "node:path";
 
+/**
+ * FRI-2037: these cases assert which TOOLS each caller type is given, by
+ * reaching into the constructed server's `instance._registeredTools`. That is
+ * a property of server CONSTRUCTION and is unchanged by hosting — but a
+ * hosted entry is an `{ type: "http" }` config with no `instance`, so the
+ * assertions need the in-process form to inspect.
+ *
+ * Pinning the legacy path here keeps these covering what they were written to
+ * cover. The hosted path's own contract — that the same server NAMES appear,
+ * as http configs — is asserted separately below, so neither form is
+ * unguarded.
+ */
+beforeEach(() => {
+  process.env.FRIDAY_MCP_HOSTED = "0";
+});
+afterEach(() => {
+  delete process.env.FRIDAY_MCP_HOSTED;
+});
+
 const logMock = vi.fn();
 vi.mock("../log.js", () => ({
   logger: { log: logMock },
