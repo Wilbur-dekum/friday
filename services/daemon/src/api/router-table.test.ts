@@ -4,16 +4,16 @@ import type { RouteRow } from "./router.js";
 
 /**
  * Route-table CONTRACT test (handoff Test Strategy §5). The cascade→table
- * migration's highest-leverage safety net: it asserts, against the REAL 83-row
+ * migration's highest-leverage safety net: it asserts, against the REAL 84-row
  * table, the invariants a per-route integration test can't see —
  *   1. every row has a unique (method, match) key (no accidental shadow/dupe),
  *   2. the table covers EXACTLY the golden (method, match) set the original
  *      cascade served — no route silently dropped or added,
  *   3. ordering-sensitive specific routes precede the broad regexes that would
  *      otherwise swallow them,
- *   4. the auth-gated set is exactly the 21 routes the cascade gated inline
+ *   4. the auth-gated set is exactly the 22 routes the cascade gated inline
  *      (a security-regression guard), and
- *   5. the streaming/binary/seam routes are exactly the 5 `raw` rows.
+ *   5. the streaming/binary/seam routes are exactly the 6 `raw` rows.
  *
  * A new route is expected to update GOLDEN/GOLDEN_AUTH here — that friction is
  * the point: it forces every routing change to be intentional and reviewed.
@@ -35,6 +35,7 @@ function rowKey(row: RouteRow): string {
 // The golden (method, match) set the original cascade served — hand-listed
 // independently of the table so a drop/add/rename in ROUTES fails loudly.
 const GOLDEN: string[] = [
+  "POST re:^\\/api\\/mcp\\/[a-z0-9-]+$",
   "GET /api/health",
   "POST /api/secrets/reload",
   "POST /api/secrets/audit",
@@ -124,6 +125,7 @@ const GOLDEN: string[] = [
 // the gate to a per-row flag must not silently make any of these public — nor
 // gate anything that wasn't.
 const GOLDEN_AUTH: string[] = [
+  "POST re:^\\/api\\/mcp\\/[a-z0-9-]+$",
   "GET /api/health",
   "POST /api/secrets/reload",
   "POST /api/secrets/audit",
@@ -150,6 +152,7 @@ const GOLDEN_AUTH: string[] = [
 // The streaming/binary/seam routes that must own req/res (raw), never the
 // JSON envelope.
 const GOLDEN_RAW: string[] = [
+  "POST re:^\\/api\\/mcp\\/[a-z0-9-]+$",
   "POST /api/commands/dispatch",
   "GET /api/events",
   "POST /api/evolve/scan",
@@ -172,7 +175,7 @@ describe("ROUTES contract", () => {
     const added = [...actual].filter((k) => !golden.has(k));
     expect({ dropped, added }).toEqual({ dropped: [], added: [] });
     expect(ROUTES.length).toBe(GOLDEN.length);
-    expect(ROUTES.length).toBe(83);
+    expect(ROUTES.length).toBe(84);
   });
 
   it("orders every specific route before the broad regex that would swallow it", () => {
@@ -197,16 +200,16 @@ describe("ROUTES contract", () => {
     }
   });
 
-  it("gates EXACTLY the 21 cascade-gated routes with auth:true (no public regression)", () => {
+  it("gates EXACTLY the 22 cascade-gated routes with auth:true (no public regression)", () => {
     const gated = new Set(ROUTES.filter((r) => r.auth === true).map(rowKey));
     const golden = new Set(GOLDEN_AUTH);
     const lostGate = [...golden].filter((k) => !gated.has(k));
     const newGate = [...gated].filter((k) => !golden.has(k));
     expect({ lostGate, newGate }).toEqual({ lostGate: [], newGate: [] });
-    expect(gated.size).toBe(21);
+    expect(gated.size).toBe(22);
   });
 
-  it("marks EXACTLY the 5 streaming/binary/seam routes as raw (owns req/res)", () => {
+  it("marks EXACTLY the 6 streaming/binary/seam routes as raw (owns req/res)", () => {
     const raw = new Set(ROUTES.filter((r) => r.raw != null).map(rowKey));
     expect([...raw].sort()).toEqual([...GOLDEN_RAW].sort());
     // raw rows own the response: they carry no JSON handler/schema.
