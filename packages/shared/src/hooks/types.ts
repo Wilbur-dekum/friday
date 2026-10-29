@@ -1,3 +1,4 @@
+import type { ActingUser } from "../prompts/loader.js";
 import type { Skill } from "../skills.js";
 
 export type HookEvent =
@@ -31,6 +32,11 @@ export interface HookContextMap {
     body: string;
     agentType: string;
     skillMatch?: SkillMatch;
+    /** FRI-2016: the User this turn runs on behalf of, or absent when there is
+     *  no human behind it (schedule, mail, agent_spawn). Rides the hook
+     *  context so the block lands on the PER-TURN body — the system prompt is
+     *  fork-time only, and the speaker varies turn to turn. */
+    actingUser?: ActingUser;
   };
   before_tool_call: {
     workspacePath: string;

@@ -17,12 +17,7 @@
  * + the `DispatchIntent` union lives in `intent.ts`.
  */
 
-import {
-  composeSystemPrompt,
-  readPromptStack,
-  type ActingUser,
-  type AgentBaseKey,
-} from "@friday/shared";
+import { composeSystemPrompt, readPromptStack, type AgentBaseKey } from "@friday/shared";
 import { listPinnedForAgent } from "@friday/memory";
 
 /**
@@ -61,17 +56,7 @@ export interface BuiltSystemPrompt {
   systemPrompt: string;
 }
 
-/**
- * FRI-2016: `actingUser` is the User on whose behalf this turn runs, or
- * `undefined` when there is no human behind it (scheduled run, mail-triggered
- * turn, `agent_spawn`). Optional rather than required on purpose — the
- * no-User case is permanent, not a migration step, and forcing every caller
- * to pass `null` would only invite passing a wrong value to satisfy the type.
- */
-export async function buildSystemPrompt(
-  agentRow: PromptAgentRow,
-  actingUser?: ActingUser,
-): Promise<BuiltSystemPrompt> {
+export async function buildSystemPrompt(agentRow: PromptAgentRow): Promise<BuiltSystemPrompt> {
   const stack = readPromptStack(agentRow.type, []);
   const pinnedFacts = await renderPinnedFacts(agentRow.name);
   const systemPrompt = composeSystemPrompt(
@@ -82,7 +67,6 @@ export async function buildSystemPrompt(
       parentName: agentRow.parentName,
     },
     pinnedFacts,
-    actingUser,
   );
   return { systemPrompt };
 }

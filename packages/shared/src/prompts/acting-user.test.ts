@@ -7,11 +7,15 @@ import {
 } from "./loader.js";
 
 /**
- * FRI-2016 — the acting User reaches prompt assembly.
+ * FRI-2016 — the acting User reaches the turn.
  *
- * Before this, `buildSystemPrompt`/`buildDispatchPrompt` took only an agent
- * row and an intent, so no user id reached the prompt at all even though
- * `blocks.user_id` was sitting on the originating row.
+ * The first implementation composed this into the SYSTEM prompt, which is
+ * wrong for a reason this repo has already hit twice (FRI-89 memory recall,
+ * FRI-167 datetime): the daemon never re-sends a system prompt to a live
+ * worker, so it is materialized once per worker fork and frozen across
+ * `resume`. A long-lived orchestrator would keep naming whoever forked it.
+ *
+ * It now rides the per-turn body channel. These tests pin that.
  */
 
 const USER: ActingUser = {
@@ -43,32 +47,29 @@ describe("renderActingUserBlock", () => {
     // whoever happens to be speaking.
     expect(renderActingUserBlock(USER)).toMatch(/not assume they are the only User/i);
   });
+
+  it("is a tagged per-turn envelope, not a prompt-stack heading", () => {
+    // `<memory-context>` and `<skill-context>` are the in-repo precedent for
+    // per-turn blocks. A `# Heading` would read as a peer of `# Identity` —
+    // i.e. as a system-prompt stack element, which is exactly the shape this
+    // block must not have.
+    const out = renderActingUserBlock(USER);
+    expect(out.startsWith("<acting-user")).toBe(true);
+    expect(out.trimEnd().endsWith("</acting-user>")).toBe(true);
+    expect(out).not.toMatch(/^#/m);
+  });
 });
 
-describe("composeSystemPrompt with an acting User", () => {
-  it("places the block after the agent's own identity", () => {
-    const out = composeSystemPrompt(
-      STACK,
-      { agentName: "friday", agentType: "orchestrator" },
-      undefined,
-      USER,
-    );
-    const identityAt = out.indexOf("# Identity");
-    const userAt = out.indexOf("# Who you are speaking with");
-    const baseAt = out.indexOf("AGENT_BASE");
-    expect(identityAt).toBeGreaterThan(-1);
-    expect(userAt).toBeGreaterThan(identityAt);
-    // ...and before the agent-type instructions, which may refer to either.
-    expect(baseAt).toBeGreaterThan(userAt);
-  });
-
-  it("omits the block entirely when there is no acting User", () => {
-    // A scheduled run, a mail-triggered turn and an agent_spawn have no human
-    // behind them. That is a normal turn, so it must not render an "unknown
-    // user" placeholder the model could then talk about.
+describe("composeSystemPrompt", () => {
+  it("never contains the acting User — the system prompt is fork-time only", () => {
+    // THE regression test. `WorkerPromptCommand` has no `systemPrompt` field
+    // and `dispatchTurn`'s live-worker branch does not carry one, so anything
+    // here is frozen for the life of the worker while the speaker varies per
+    // turn. If a future change threads a user into this function, this fails.
     const out = composeSystemPrompt(STACK, { agentName: "friday", agentType: "orchestrator" });
-    expect(out).not.toContain("# Who you are speaking with");
-    expect(out).not.toMatch(/unknown/i);
+    expect(out).not.toContain("acting-user");
+    expect(out).not.toContain("Ada");
+    expect(out).not.toContain(USER.id);
   });
 
   it("still composes the rest of the stack in canonical order", () => {
@@ -76,13 +77,11 @@ describe("composeSystemPrompt with an acting User", () => {
       STACK,
       { agentName: "friday", agentType: "orchestrator" },
       "# Pinned facts\n\n- x",
-      USER,
     );
     const order = [
       "CONSTITUTION",
       "SOUL",
       "# Identity",
-      "# Who you are speaking with",
       "# Pinned facts",
       "AGENT_BASE",
       "PROTOCOLS",

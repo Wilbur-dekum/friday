@@ -129,7 +129,7 @@ export async function buildDispatchPrompt(
   const baseSystemPrompt =
     intent.kind === "agent_spawn" && intent.baseSystemPromptOverride !== undefined
       ? intent.baseSystemPromptOverride
-      : (await buildSystemPrompt(agentRow, actingUser)).systemPrompt;
+      : (await buildSystemPrompt(agentRow)).systemPrompt;
 
   const resolved = resolveIntent(intent);
 
@@ -139,6 +139,11 @@ export async function buildDispatchPrompt(
     body: resolved.body,
     agentType: agentRow.type,
     skillMatch: resolved.skillMatch,
+    // FRI-2016 (reversal): the acting User rides the PER-TURN body via
+    // `actingUserHook`, not the system prompt. The system prompt is
+    // materialized once per worker fork and frozen across resume, while the
+    // speaker varies turn to turn — see renderActingUserBlock.
+    actingUser,
   });
 
   let body = resolved.body;
