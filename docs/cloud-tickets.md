@@ -894,6 +894,92 @@ processes inherit the toolchain today, and would end ADR-050's one-image
 invariant as a self-enforcing property — the invariant holds precisely because
 the daily driver runs the shipped artifact.
 
+### FRI-2072 — The daemon binds loopback; 62 of 84 routes rely on that alone
+
+`bug` · parent FRI-2036 · ADR-050, ADR-054, ADR-002
+
+**Blocks FRI-2038.** Measured while checking what breaks for a containerised
+worker:
+
+- From a second container, `friday:7610` is **ECONNREFUSED** — the daemon binds
+  `127.0.0.1` inside its own container, so nothing outside can reach it.
+  `friday:7615` answers and 401s, so the network path is fine; the daemon is
+  simply not listening on it.
+- Of 84 routes, **22** carry `auth: true`. The router's own comment says the
+  rest "rely on the 127.0.0.1 binding + injected daemon secret instead".
+  Verified: `GET /api/tickets` with `Host: evil.example` and the daemon secret
+  returns **200**. The bind is the control, not a Host check.
+
+A worker in its own container has to reach the daemon, so the daemon must bind
+wider — and the moment it does, 62 ungated routes become reachable by whatever
+shares that network.
+
+This corrects an assumption recorded in FRI-2037's PR #24, which framed
+`authorizeSameHost`'s loopback-`Host` layer as the wall a containerised worker
+hits. True for the 22 gated routes; for the other 62 there is no wall, because
+there is no check. Sharper, not milder.
+
+Order matters: decide what the Deployment-internal network is, audit the 62,
+and only then bind wider. Binding first leaves a window where the whole surface
+is exposed to the worker container. The FRI-2037 per-worker token is the
+credential this needs; what is missing is applying it to the routes a
+token-bearing worker will call.
+
+### FRI-2073 — Host `friday-memory` daemon-side
+
+`task` · parent FRI-2036 · ADR-054
+
+First of the three servers FRI-2037 left in the worker. Unlike the eleven
+already hosted, this one does local work beyond `daemonFetch`, so it is a port
+rather than a registry entry — take it first, lowest stakes, and it establishes
+the pattern for a server whose handlers are not pure daemon clients.
+
+Constraint: the hosted form runs in the daemon, so the local work must be
+correct there or move. The memory store is file-backed under
+`$FRIDAY_DATA_DIR` with Postgres as a searchable mirror and the daemon has the
+same data dir, so this is likely straightforward — verify rather than assume.
+
+### FRI-2074 — Host `friday-elicitation` daemon-side
+
+`task` · parent FRI-2036 · ADR-054
+
+Second, and the hard one: `ask_user` is a round trip to a human, not
+request/response. The daemon exposes a long-poll (`POST /api/elicitation/wait`)
+plus a submit route, and the tool blocks until the user answers.
+
+Settle, do not assume: does a long-poll survive the hosted transport?
+`host.ts` runs StreamableHTTP **stateless**, a fresh transport per request, so
+a call blocking for minutes holds that request open — check it against server
+and proxy timeouts. And FRI-2037 established that abort reaches a hosted
+handler by CONNECTION CLOSE, not `notifications/cancelled` (stateless cannot
+correlate one), so a user pressing Stop mid-elicitation must close the request
+or every cancelled question leaks a handle. `host-abort.test.ts` is the model
+for proving it.
+
+### FRI-2075 — Host `friday-secrets` daemon-side
+
+`task` · parent FRI-2036 · ADR-037, ADR-051, ADR-054
+
+Last, deliberately — the one where being wrong matters most should land on a
+pattern already proven by FRI-2073 and FRI-2074.
+
+A security improvement, not just plumbing: today the secrets tool runs in the
+worker process, the same process running untrusted repository code
+(`docs/sandbox.md` residual risk #1). Hosted, a compromised worker can call the
+tool but cannot reach the vault machinery.
+
+Constraints: `appId` scopes which App's secrets a caller reaches and must be
+DERIVED from the per-worker token, never asserted — `WorkerIdentity.appId` and
+`callerFromRequest` already carry it, and this server is the main reason that
+plumbing exists. The age vault does not move; FRI-2010's runtime-injected
+identity is unchanged. And hosting does NOT close FRI-2062's accepted risk that
+a builder can read `$FRIDAY_DATA_DIR` inside the Deployment container — only
+per-task containers (FRI-2038) do. Do not claim otherwise.
+
+All three are required for FRI-2038 regardless of their individual merits: per
+FRI-2072, a server still built in the worker fails with ECONNREFUSED the moment
+the worker is containerised.
+
 ---
 
 ## FRI-2044 — E5: Control plane
