@@ -25,6 +25,7 @@ describe("buildMcpServers: hosted path (default)", () => {
       "friday-agents",
       "friday-reminder",
       "friday-habit",
+      "friday-memory",
     ]) {
       expect(servers[name], `${name} should be present`).toBeDefined();
       expect(servers[name], `${name} should be hosted`).toMatchObject({

@@ -10,6 +10,7 @@ import { buildHabitServer, HABIT_SERVER_NAME } from "./habit.js";
 import { buildInboxServer, INBOX_SERVER_NAME } from "./inbox.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
+import { buildMemoryServer, MEMORY_SERVER_NAME } from "./memory.js";
 import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
@@ -65,8 +66,8 @@ import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
  *
  * Still absent, for reasons that are not about scoping:
  * `friday-elicitation` (round-trips to the user through a long-poll that has
- * to survive the transport change), `friday-secrets` (touches the age vault),
- * `friday-memory` (has local work).
+ * to survive the transport change — FRI-2074) and `friday-secrets` (touches
+ * the age vault — FRI-2075).
  */
 const HOSTED = {
   [AGENTS_SERVER_NAME]: buildAgentsServer,
@@ -78,6 +79,7 @@ const HOSTED = {
   [INBOX_SERVER_NAME]: buildInboxServer,
   [INTEGRATIONS_SERVER_NAME]: buildIntegrationsServer,
   [MAIL_SERVER_NAME]: buildMailServer,
+  [MEMORY_SERVER_NAME]: buildMemoryServer,
   [SCHEDULE_SERVER_NAME]: buildScheduleServer,
   [TICKETS_SERVER_NAME]: buildTicketsServer,
 } as const;
