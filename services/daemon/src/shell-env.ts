@@ -149,6 +149,52 @@ export function sanitizedProcessEnvForChild(): NodeJS.ProcessEnv {
   return out;
 }
 
+/**
+ * The ONLY secret-shaped keys the Claude Code child keeps (FRI-2059).
+ *
+ * FRI-2012 established that the boundary worth defending is one level deeper
+ * than the worker: the env handed to the Claude Code child, which the agent's
+ * Bash tool and everything it spawns inherit. That is where untrusted
+ * repository code actually runs — and it was getting raw `process.env`,
+ * because the existing sanitizer strips these four along with everything else
+ * and the CLI cannot authenticate without them.
+ *
+ * So this is a deny-list with a named exception rather than a blanket strip.
+ * Each entry is here because the CLI genuinely needs it AND the deny-list
+ * would otherwise take it. A non-secret key like `ANTHROPIC_BASE_URL` passes
+ * through on its own and must not be listed — an exception that excepts
+ * nothing makes the list look like it is doing more than it is. A test
+ * enforces both halves.
+ *
+ * RESIDUAL RISK, stated rather than implied: whatever the CLI holds, its own
+ * children inherit, so the Anthropic credential does reach the Bash tool. We
+ * cannot scrub a process we do not spawn. Narrowing that further means a
+ * credential proxy, not a longer list — out of scope here, and the reason
+ * this list must stay short.
+ */
+export const CLAUDE_CLI_CREDENTIAL_KEYS: ReadonlySet<string> = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+]);
+
+/**
+ * `process.env` for the Claude Code child: secrets stripped, the CLI's own
+ * credentials kept.
+ *
+ * Distinct from `sanitizedProcessEnvForChild`, which has no exceptions and is
+ * right for the shell-capture child — that one only has to run `.zshrc`, so
+ * it needs no Anthropic credential at all.
+ */
+export function claudeCodeChildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (typeof v !== "string") continue;
+    if (!isSecretKey(k) || CLAUDE_CLI_CREDENTIAL_KEYS.has(k)) out[k] = v;
+  }
+  return out;
+}
+
 export type ShellEnvSource = "shell" | "process";
 
 export interface ShellEnvResult {
