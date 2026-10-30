@@ -194,8 +194,29 @@ function startsWithPath(p: string, root: string): boolean {
   return p === root || p.startsWith(root + "/");
 }
 
+/**
+ * `.git/hooks`, anywhere — including INSIDE the worktree (FRI-2042).
+ *
+ * Every other deny path is absolute and outside the workspace. This one is
+ * the inversion: a path the Builder otherwise owns, denied because of what
+ * git does with it. A hook dropped here re-executes on the next
+ * checkout/commit, and it survives on the reattached worktree volume — which
+ * is the specific mechanism that makes per-turn container ephemerality
+ * illusory, and why FRI-2038 states its guarantee as "bounded to one
+ * assignment" rather than per-turn.
+ *
+ * Relative as well as absolute, because the worker's cwd IS the worktree, so
+ * `.git/hooks/post-checkout` is the form this actually takes.
+ */
+const GIT_HOOKS_SEGMENT = /(^|\/)\.git\/hooks(\/|$)/;
+
+function isGitHooksPath(p: string): boolean {
+  return GIT_HOOKS_SEGMENT.test(p);
+}
+
 function isUnderDenyPath(p: string): boolean {
   if (WRITE_DENY_LITERALS.has(p)) return true;
+  if (isGitHooksPath(p)) return true;
   return WRITE_DENY_PREFIXES.some((d) => startsWithPath(p, d));
 }
 
@@ -356,6 +377,12 @@ function checkGit(cmd: ParsedCommand): string | null {
   }
   if (!sub) return null;
 
+  // FRI-2042: relocating the hooks directory is the same persistence with a
+  // different path, and no path check can catch it — the dangerous value is
+  // an ordinary-looking directory the repo already contains.
+  if (sub === "config" && cmd.argv.some((a) => /^core\.hooksPath$/i.test(a))) {
+    return `git config core.hooksPath blocked — relocating hooks is a persistence vector (FRI-2042)`;
+  }
   if (sub === "filter-branch" || sub === "filter-repo") {
     return `git blocked — "${sub}" is irrevocable`;
   }
