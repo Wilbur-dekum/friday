@@ -29,6 +29,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
+import { fakeWorkerHandle, type FakeWorkerHandle } from "./worker-handle.fake.js";
 
 // Don't leak Linear API calls in tests that don't install a fetch mock.
 delete process.env.LINEAR_API_KEY;
@@ -59,33 +60,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-interface FakeChild {
-  send: ReturnType<typeof vi.fn>;
-  once: ReturnType<typeof vi.fn>;
-  on: ReturnType<typeof vi.fn>;
-  exitCode: number | null;
-  killed: boolean;
-  pid?: number;
-}
-
 /** A LiveWorker double good enough for the archive / abort-deadline paths.
- *  `pgid: 0` makes killPgrp a no-op (no real SIGTERM); `exitCode: 0` makes
- *  `drainLiveWorker` take its early "child already gone" branch and resolve
- *  immediately, so worker teardown after an archive Transition doesn't hang. */
+ *
+ *  FRI-2037: `handle`, not `child`. This file is excluded from `pnpm test`,
+ *  so it kept the pre-seam shape straight through the migration —
+ *  `w.handle.send` threw `Cannot read properties of undefined`, which
+ *  surfaced as an unhandled rejection rather than a clean failure.
+ *
+ *  `pgid: 0` keeps killPgrp a no-op (no real SIGTERM). The handle starts NOT
+ *  alive, which is what the old `exitCode: 0` meant: `drainLiveWorker` takes
+ *  its early "already gone" branch and resolves immediately, so worker
+ *  teardown after an archive Transition doesn't hang on the full drain. */
 function makeFakeWorker(overrides: Record<string, unknown> = {}): {
   worker: unknown;
-  child: FakeChild;
+  workerHandle: FakeWorkerHandle;
 } {
-  const child: FakeChild = {
-    send: vi.fn(),
-    once: vi.fn(),
-    on: vi.fn(),
-    exitCode: 0,
-    killed: false,
-    pid: 0,
-  };
+  const workerHandle = fakeWorkerHandle({ pid: 0, alive: false });
   const w = {
-    child,
+    handle: workerHandle,
     pgid: 0,
     agentName: "ch-agent",
     agentType: "bare",
@@ -111,7 +103,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
     noMailBackStreak: 0,
     ...overrides,
   };
-  return { worker: w, child };
+  return { worker: w, workerHandle };
 }
 
 describe("FRI-145 M4: single writer of agents.status (real collaborators)", () => {
@@ -175,8 +167,9 @@ describe("FRI-145 M4: single writer of agents.status (real collaborators)", () =
     const NAME = "bus-order";
     await registry.registerAgent({ name: NAME, type: "bare" });
     await registry.setStatus(NAME, "working");
-    const { worker, child } = makeFakeWorker({ agentName: NAME, turnId: "turn-bus" });
-    child.exitCode = null; // keep it "alive" so finalize/publish run on this gen
+    // `workerHandle`, not `handle`: the module-level `handle` is the test DB.
+    const { worker, workerHandle } = makeFakeWorker({ agentName: NAME, turnId: "turn-bus" });
+    workerHandle.setAlive(true); // keep it alive so finalize/publish run on this gen
     lifecycle.__putLiveWorkerForTest(NAME, worker as never);
 
     // turn_started opens the eventBus turn buffer so per-agent events route.
@@ -245,7 +238,11 @@ describe("FRI-145 M4: single writer of agents.status (real collaborators)", () =
     // "working"` (not exitCode), so the deadline arms; with a fake (pgid 0)
     // worker the descendant kill is a no-op and the deadline timer is the only
     // thing that fires.
-    expect(lifecycle.abortTurn(NAME)).toBe(true);
+    // `abortTurn` became async with the FRI-2037 seam (it awaits
+    // `terminateDescendants`). Asserting on the un-awaited call compared a
+    // Promise to `true` — a failure for the wrong reason, which hid the real
+    // one underneath it.
+    expect(await lifecycle.abortTurn(NAME)).toBe(true);
 
     // Archive runs WHILE the deadline is armed: it deletes the live entry and
     // writes `archived`. This supersedes the worker's Generation.
