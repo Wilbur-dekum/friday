@@ -42,6 +42,12 @@ const GOLDEN: string[] = [
   "GET /api/commands",
   "POST /api/commands/dispatch",
   "GET /api/events",
+  // FRI-2078: GitHub on Friday's own credential. The repo and head branch
+  // come from the caller's registry row, so neither is a path parameter —
+  // and there is deliberately NO merge route, which is how "halt at a green
+  // PR, never merge" stops being a prompt rule.
+  "POST /api/github/pr",
+  "GET /api/github/pr-checks",
   // FRI-2076: the Builder's repo, served to its container. The repository is
   // NOT a path parameter — it is resolved from the per-worker token — so these
   // are two fixed verbs, not a prefix match. `git-receive-pack` is absent on
@@ -185,7 +191,7 @@ describe("ROUTES contract", () => {
     const added = [...actual].filter((k) => !golden.has(k));
     expect({ dropped, added }).toEqual({ dropped: [], added: [] });
     expect(ROUTES.length).toBe(GOLDEN.length);
-    expect(ROUTES.length).toBe(86);
+    expect(ROUTES.length).toBe(88);
   });
 
   it("orders every specific route before the broad regex that would swallow it", () => {

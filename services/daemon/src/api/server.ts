@@ -184,6 +184,12 @@ import {
 } from "./worker-listener.js";
 import { attachWorkerChannel } from "./worker-channel.js";
 import { handleWorkerGit } from "./worker-git.js";
+import {
+  createPullRequest,
+  parseGitHubRemote,
+  pullRequestChecks,
+  type GitHubRepoRef,
+} from "../services/github.js";
 import { acceptChannel } from "../agent/container-runtime.js";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
@@ -423,6 +429,22 @@ export const ROUTES: RouteRow[] = [
   },
 
   // --- SSE events --- (streaming; owns res for the connection lifetime)
+  // --- GitHub, on Friday's own credential (FRI-2078) ---
+  // The repo and head branch come from the CALLER's registry row, never from
+  // the request: a Builder may open a PR from its own branch on its own repo
+  // and nothing else. There is deliberately no merge route.
+  {
+    method: "POST",
+    match: "/api/github/pr",
+    body: "json",
+    handler: async (ctx) => handleCreatePr(ctx),
+  },
+  {
+    method: "GET",
+    match: "/api/github/pr-checks",
+    handler: async (ctx) => handlePrChecks(ctx),
+  },
+
   // --- The Builder's repository, served to its container (FRI-2076) ---
   // Raw: git's smart HTTP is a binary pkt-line protocol, so the handler owns
   // req/res. The repository is NOT in the URL — it is resolved from the
@@ -2910,4 +2932,127 @@ function sanitizeFilenameForHeader(raw: string): {
   const ascii = cleaned.replace(/[^\x20-\x7e]/g, "_") || "attachment";
   const rfc5987 = encodeURIComponent(cleaned).replace(/['()]/g, escape);
   return { ascii, rfc5987 };
+}
+
+/**
+ * Resolve which GitHub repo and branch the CALLER may act on (FRI-2078).
+ *
+ * Both come from the caller's own registry row. A Builder that could name
+ * either would make FRI-2041's allowlist a suggestion, so neither appears in
+ * the tool schemas above it.
+ */
+async function githubContextFor(
+  callerName: string,
+): Promise<
+  | { ok: true; repo: GitHubRepoRef; head: string; token: string }
+  | { ok: false; status: number; error: string }
+> {
+  const token = loadFridayConfig().githubToken;
+  if (!token) {
+    return {
+      ok: false,
+      status: 503,
+      error:
+        "no GitHub credential is configured — set one with `friday secrets set GITHUB_TOKEN --daemon`",
+    };
+  }
+  const agent = await registry.getAgent(callerName);
+  if (!agent || agent.type !== "builder") {
+    return { ok: false, status: 403, error: "only a Builder may open a pull request" };
+  }
+  const branch = "branch" in agent ? agent.branch : undefined;
+  if (!branch) {
+    return { ok: false, status: 409, error: "this Builder has no branch to open a PR from" };
+  }
+  const sourceRepo = await registry.getWorkspaceRepo(callerName);
+  if (!sourceRepo) {
+    return { ok: false, status: 409, error: "this Builder has no repository on its row" };
+  }
+  const repo = parseGitHubRemote(sourceRepo);
+  if (!repo) {
+    // A local-path repo is the common `worktree.repo` value and has no GitHub
+    // remote. Saying so beats a confident 404 from the API.
+    return {
+      ok: false,
+      status: 409,
+      error: `this Builder's repository is not a GitHub remote: ${sourceRepo}`,
+    };
+  }
+  return { ok: true, repo, head: branch, token };
+}
+
+/**
+ * Which branches a PR may target.
+ *
+ * The repository's own default branch, or another `friday/*` branch for a
+ * stacked PR. Anything else is refused: the point of hosting this is that the
+ * daemon decides the target, and "any branch the agent names" is not a
+ * decision.
+ */
+function isAllowedBase(base: string): boolean {
+  return base === "main" || base === "master" || base.startsWith("friday/");
+}
+
+async function handleCreatePr(ctx: {
+  req: IncomingMessage;
+  body: unknown;
+}): Promise<{ status: number; body: unknown }> {
+  const callerName = String(ctx.req.headers["x-friday-caller-name"] ?? "");
+  const resolved = await githubContextFor(callerName);
+  if (!resolved.ok) return { status: resolved.status, body: { error: resolved.error } };
+
+  const input = ctx.body as { title?: unknown; body?: unknown; base?: unknown };
+  const title = typeof input.title === "string" ? input.title.trim() : "";
+  if (!title) return { status: 400, body: { error: "title is required" } };
+  const base = typeof input.base === "string" && input.base ? input.base : "main";
+  if (!isAllowedBase(base)) {
+    logger.log("warn", "github.pr.base-denied", { agent: callerName, base });
+    return {
+      status: 403,
+      body: { error: `base branch not permitted: ${base} (main, master or friday/* only)` },
+    };
+  }
+  try {
+    const pr = await createPullRequest({
+      token: resolved.token,
+      repo: resolved.repo,
+      head: resolved.head,
+      base,
+      title,
+      ...(typeof input.body === "string" ? { body: input.body } : {}),
+    });
+    logger.log("info", "github.pr.created", {
+      agent: callerName,
+      number: pr.number,
+      head: pr.head,
+      base: pr.base,
+      url: pr.url,
+    });
+    return { status: 200, body: pr };
+  } catch (err) {
+    // GitHub's own message reaches the agent — "a PR already exists" and
+    // "base is invalid" want different responses from a Builder.
+    return { status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+  }
+}
+
+async function handlePrChecks(ctx: {
+  req: IncomingMessage;
+  url: URL;
+}): Promise<{ status: number; body: unknown }> {
+  const callerName = String(ctx.req.headers["x-friday-caller-name"] ?? "");
+  const resolved = await githubContextFor(callerName);
+  if (!resolved.ok) return { status: resolved.status, body: { error: resolved.error } };
+  const number = Number.parseInt(ctx.url.searchParams.get("number") ?? "", 10);
+  if (!Number.isInteger(number) || number <= 0) {
+    return { status: 400, body: { error: "number must be a positive integer" } };
+  }
+  try {
+    return {
+      status: 200,
+      body: await pullRequestChecks({ token: resolved.token, repo: resolved.repo, number }),
+    };
+  } catch (err) {
+    return { status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+  }
 }
