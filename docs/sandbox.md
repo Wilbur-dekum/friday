@@ -187,6 +187,32 @@ network, which is currently unrestricted.
 The full rewrite of this document around cgroups and container lifetime is
 FRI-2043. This section is the interim honest account, not that rewrite.
 
+## `.git/hooks` is denied inside the worktree (FRI-2042)
+
+Every other entry on the M1 write deny-list is an absolute path **outside**
+the workspace. `.git/hooks` inverts that: it is a path the Builder otherwise
+owns, denied because of what git does with it.
+
+A `post-checkout` or `pre-commit` dropped there re-executes on the next turn
+in an otherwise "fresh" container, because it survives on the reattached
+worktree volume. That is the specific mechanism that makes per-turn container
+ephemerality illusory, and the reason FRI-2038 states its guarantee as
+**bounded to one assignment** rather than per-turn.
+
+`git config core.hooksPath` is denied too. It is the same persistence with a
+different path, and no path check can catch it — the dangerous value is an
+ordinary-looking directory the repository already contains.
+
+The match is a path _segment_ (`(^|/)\.git/hooks(/|$)`), not a substring, so
+`.github/hooks/` and `src/git/hooks/` — ordinary paths in plenty of repos —
+are untouched. The rest of `.git` is untouched as well: Builders commit,
+branch and push.
+
+**What this does not cover,** consistent with the rest of M1: a compromised
+`postinstall` writes hooks from inside `npm install` and never goes through
+the Bash tool at all. This is the regex layer. The container is the boundary
+that answers that case, which is why FRI-2038 exists.
+
 ## The Claude Code child's environment (FRI-2059)
 
 FRI-2012 established that the boundary worth defending is **one level deeper
