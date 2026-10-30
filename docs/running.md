@@ -466,6 +466,32 @@ Two traps worth knowing:
 - **Both env files are read, `.env.local` winning on conflict.** It used to be either/or — `.env.local` when it existed, `.env` otherwise — which was invisible on a laptop and broke on migration, because `friday restore` _writes_ `.env.local` and thereby silently orphaned every key in `.env`. The symptom was not a config error: the Deployment booted healthy and every turn answered `Not logged in · Please run /login`.
 - **The musl build must stay out of the image.** pnpm installs both linux variants of the SDK's bundled binary; the SDK picks musl on a glibc image, and executing it fails with `ENOENT` for the missing loader — which the SDK reports as the misleading _"Claude Code native binary not found"_ even though the file is present. The Dockerfile prunes it in the builder stage, with an assertion so a silent re-add fails the build.
 
+### GitHub (Builders)
+
+Builders open PRs and read CI through Friday's own credential, not through
+`gh`. Set it once:
+
+```bash
+friday secrets set GITHUB_TOKEN --daemon
+```
+
+`loadFridayConfig` caches, so it takes effect on `POST /api/secrets/reload`
+or the next restart. Until then `pr_create` returns 503 naming that command.
+
+This replaced an ambient arrangement worth understanding, because it looked
+like it worked: a Builder's `gh pr create` ran on whatever `gh` login existed
+on the daemon's machine, reaching the worker through the FRI-150 shell-env
+capture. Friday could not scope that credential, revoke it, or attribute an
+action taken with it to a User — and in a per-task container (FRI-2038) there
+is no `gh` login to inherit at all.
+
+What a Builder can do with it is deliberately narrow: open a PR **from its own
+branch on its own repo** (both resolved daemon-side from its registry row, and
+absent from the tool schemas), targeting the main branch or another `friday/*`
+branch. There is **no merge tool** — "halt at a green PR" stops being a prompt
+rule and becomes an operation that does not exist. See `docs/mcp.md` →
+`friday-github`.
+
 ### Secrets
 
 Integration secrets live in an age-encrypted vault at `$FRIDAY_DATA_DIR/secrets/vault.enc`. The identity that decrypts it resolves in order:

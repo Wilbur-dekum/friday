@@ -24,7 +24,7 @@ Don't leave Linear tickets stuck in `backlog` once work has started. The orchest
 
 ## `Closes FRI-N` — PR-body convention
 
-When a PR closes a Linear ticket, include `Closes FRI-N` (or the equivalent for another team prefix) on its own line in the **PR body** — Linear's GitHub integration scans PR descriptions for close keywords and moves the linked issue to `completed` on merge. Builders are responsible for putting this in the body when they `gh pr create`; the orchestrator should not have to chase merges to manually transition.
+When a PR closes a Linear ticket, include `Closes FRI-N` (or the equivalent for another team prefix) on its own line in the **PR body** — Linear's GitHub integration scans PR descriptions for close keywords and moves the linked issue to `completed` on merge. Builders are responsible for putting this in the `body` they pass to `pr_create`; the orchestrator should not have to chase merges to manually transition.
 
 Conventions:
 
