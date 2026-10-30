@@ -331,6 +331,19 @@ Two places the container boundary is lossy, stated rather than papered over:
   `worker.abort.descendants-killed` logs `null` — not `0`, which would read as
   "nothing was running".
 
+**Not wired yet: the worktree.** Everything above is the transport and
+lifecycle — a worker can be created, driven and stopped as a container. A
+_Builder_ additionally needs its worktree, and `createWorkspace` still runs in
+the daemon process against the daemon's own `workspaces/` root, which a
+builder container's `/workspace` volume is not. Mounting the daemon's data dir
+into the container is the wrong fix: it hands the process running untrusted
+repository code a path straight past the boundary FRI-2062 drew. So the
+worktree has to be created _inside_ the container, which needs credentials
+reaching the repo from there — the half of FRI-2041 that is waiting on a
+GitHub App (FRI-2056). There is also no image whose entrypoint is the worker
+yet; `BROKER_BUILDER_IMAGE` currently names the dev image, whose `CMD` is
+`bash`.
+
 ### Hostname and the reverse proxy
 
 The stack runs behind a Caddy reverse proxy on **<http://friday.localhost>**, not bare `localhost:7615`. That is deliberate: BetterAuth derives absolute URLs, the CSRF origin list and the session cookie's `Secure`/`__Secure-` prefix from its `baseURL`, and **hard-exits** when a configured public URL is not among `trustedOrigins`. Exercising a real hostname in dev is the only way to meet that before a Deployment does.
