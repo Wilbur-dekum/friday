@@ -456,6 +456,20 @@ export interface ArchiveWorkspaceOptions {
    * `git worktree prune` to run against the wrong repo.
    */
   repo?: string;
+  /**
+   * Who owns the workspace directory (FRI-2080). Absent reads as `"daemon"`,
+   * so every caller written before this keeps its behaviour.
+   *
+   * For a `"container"` workspace the directory is a volume the broker tears
+   * down, and the daemon has no worktree registration to remove. Skipping
+   * that work is not just tidiness: `workspacePath(name)` would resolve to the
+   * daemon's own `workspaces/<name>`, so a container Builder reusing the name
+   * of an earlier daemon-owned one would `rm -rf` a directory that was never
+   * its own. The branch delete still runs — once FRI-2077 forwards pushes the
+   * branch really does live in the daemon's git dir, and "destroy means
+   * destroy" is unchanged.
+   */
+  owner?: WorkspaceOwner;
 }
 
 /**
@@ -514,6 +528,40 @@ function readWorkspaceGitDir(workspaceDir: string): string | undefined {
   }
 }
 
+/**
+ * Who owns a Builder's workspace directory (FRI-2080).
+ *
+ * `"daemon"` is every workspace today: a `git worktree` under
+ * `<DATA_DIR>/workspaces/<name>`, on the daemon's own filesystem, which the
+ * daemon created and tears down.
+ *
+ * `"container"` is a per-task volume mounted at `/workspace` inside a builder
+ * container (FRI-2038). The daemon cannot see it, and that is not a fault to
+ * tolerate — it is a different kind of path. Recording which one it is beats
+ * sprinkling `existsSync` guards, because the guards cannot distinguish "the
+ * worktree was deleted and this Builder is broken" from "this path was never
+ * mine to look at", and those two want opposite responses.
+ */
+export type WorkspaceOwner = "daemon" | "container";
+
+/**
+ * Where a builder container's volume is mounted.
+ *
+ * Fixed by the broker's container spec, not configurable: the daemon and the
+ * broker would otherwise have to agree about it twice.
+ */
+export const CONTAINER_WORKSPACE_PATH = "/workspace";
+
+/**
+ * Whether the daemon may read, write, or delete this workspace.
+ *
+ * The single question every daemon-side consumer actually has. An absent owner
+ * reads as `"daemon"` so every row written before FRI-2080 keeps its meaning.
+ */
+export function isDaemonOwnedWorkspace(owner: WorkspaceOwner | null | undefined): boolean {
+  return (owner ?? "daemon") === "daemon";
+}
+
 export function archiveWorkspace(
   name: string,
   baseRepo: string,
@@ -530,13 +578,21 @@ export function archiveWorkspace(
   //      while the dir still exists. Read before any removal.
   //   3. `baseRepo` as handed in → last-resort backward-compat fallback.
   // In remote mode (1) always targets the bare mirror and NEVER `process.cwd()`.
+  const daemonOwned = isDaemonOwnedWorkspace(opts.owner);
   const gitDir = opts.repo
     ? resolveArchiveGitDir(opts.repo)
-    : (readWorkspaceGitDir(path) ?? baseRepo);
+    : // The in-workspace marker is only readable when the daemon can see the
+      // directory, which for a container workspace it cannot.
+      ((daemonOwned ? readWorkspaceGitDir(path) : null) ?? baseRepo);
   // The worktree directory might already be gone (manual cleanup, prior
   // failed run); the branch may still exist independently, so we don't
   // early-return when the dir is missing.
-  if (existsSync(path)) {
+  if (!daemonOwned) {
+    logger.log("info", "workspace.destroy.container-owned", {
+      name,
+      note: "volume teardown is the broker's; only the branch is deleted here",
+    });
+  } else if (existsSync(path)) {
     // FIX_FORWARD 6.4: containment check before any rm-equivalent op.
     // Resolves symlinks so we never delete outside ~/.friday/workspaces/.
     assertInsideWorkspacesRoot(path);

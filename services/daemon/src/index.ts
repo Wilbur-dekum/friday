@@ -24,6 +24,7 @@ import { backfillUsageFromLegacyJsonl, replayPending } from "@friday/shared/serv
 import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
 import { reconcile as reconcileLinear } from "@friday/integrations-linear";
 import * as registry from "./agent/registry.js";
+import { isDaemonOwnedWorkspace } from "./agent/workspace.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { recoverDanglingToolUses } from "./agent/dangling-tool-use-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
@@ -464,11 +465,17 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
     // catches rows whose status was literally "killed" — agents that
     // were raced into "idle" by the pre-F1-A exit handler slip through
     // and land here.
+    // FRI-2080: a container-owned workspace is a volume at `/workspace` inside
+    // a builder container. The daemon cannot see it, so `existsSync` would be
+    // false for every one of them and this rule would archive every
+    // containerised Builder on sight. "I cannot see it" and "it is gone" are
+    // different facts; only the second one means the Builder is broken.
     if (
       a.type === "builder" &&
       a.status !== "archived" &&
       "worktreePath" in a &&
       a.worktreePath &&
+      isDaemonOwnedWorkspace(await registry.getWorkspaceOwner(a.name)) &&
       !existsSync(a.worktreePath)
     ) {
       logger.log("info", "agent.recovery.archive-orphan", {

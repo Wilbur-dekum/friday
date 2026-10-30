@@ -1314,19 +1314,131 @@ assertions.
 
 ### FRI-2057 — Evaluate Retrofit (retrofit.sh) for schema migrations
 
-`task` · parent FRI-2068
+`task` · parent FRI-2068 · ADR-023, ADR-051
 
-Evaluate replacing or fronting Drizzle's migrator with Retrofit: PostgreSQL-only,
-records each change as one line in a git-tracked oplog, generates forward AND
-reverse migrations.
+Retrofit is a PostgreSQL-only CLI that records each schema change as one line in
+a git-tracked operation log (the "oplog"), reports the change's risks before any
+SQL exists, and renders both the forward and the reverse migration from that
+line. Evaluate it as a **front end to** our Drizzle migrator — not a
+replacement for it.
 
-Interesting here specifically because it orders changes by sequential identity
-numbers rather than timestamps — which makes our single worst silent
-upgrade-bricker (a fabricated or rounded `when`) structurally impossible instead
-of something CLAUDE.md polices by discipline. Reverse migrations also matter to
-ADR-051's fleet-upgrade story.
+**Not publicly shipped, but we can get it.** As of 2026-10-30 the site's own
+status says _"Not shipped yet"_ (pre-release): no public install path, no
+version, no stated distribution channel, and nothing on the source being open.
+Seth has access to the Retrofit repo and can pull it down when we build this, so
+acquisition is not the blocker and the first step is not a mail asking for one.
+What that access does NOT settle is the terms: whether we may vendor it into CI,
+and what a pre-release tool's version skew does to a check other people's builds
+depend on. Confirm those before any pipeline depends on it — see the first exit
+criterion below.
 
-An evaluation, not a commitment.
+**Two premises in the original entry were wrong; correcting them shrinks the
+case rather than killing it.**
+
+First, Retrofit does not order changes by "sequential identity numbers." A
+change id is a 12-character random value carrying a `prev=` pointer to the line
+before it — a content chain, whose purpose is to make a git merge that branches
+the log _detectable_ (`retrofit reconcile` resolves it). The 48-bit ElementID is
+the immutable identity of a schema _object_ (table, column, index, constraint),
+which is what makes a rename or a type change not disturb anything pointing at
+it. Both are better than a timestamp for our purposes; neither is a sequence
+number.
+
+Second — and this is the load-bearing correction — **our worst silent
+upgrade-bricker is already not silent on the boot path.** CLAUDE.md and this
+ticket both describe Drizzle's own migrator, which filters journal entries by
+`when` against `__drizzle_migrations.created_at` and skips anything below the
+max. `packages/shared/src/db/migrate.ts` is a hand-rolled runner that does not
+do that: it sorts entries by `when` and skips an entry only when its exact
+`when` is already present in `created_at`, then asserts journal count equals row
+count. Read against that code, a fabricated `when` now produces a _loud_
+failure, in one of two shapes — a duplicate `when` makes the second entry look
+applied, which the count assertion catches as `drizzle journal/db mismatch`; a
+back-dated `when` is still applied, but sorts ahead of migrations it logically
+follows, so a **fresh** install applies it in a different order than an upgraded
+box did and fails there while the upgraded box stays fine. Derived from reading
+the runner, not from a reproduction: a test that poisons a journal and runs
+`runMigrations()` both ways is the cheap way to confirm it, and is worth writing
+regardless of what happens to Retrofit.
+
+The genuinely silent form survives on one path: the `drizzle:migrate` package
+script, which shells out to `drizzle-kit migrate` and therefore gets Drizzle's
+filter-by-`when` behaviour. Nothing on the boot path uses it.
+
+**What would actually be worth buying,** then, in order:
+
+1. **Reverse migrations, generated rather than hand-written.** ADR-051's
+   fleet-upgrade story has Deployments running boot-time migrations unsupervised
+   against customer data with no canary and no rollback. We have no `down` SQL
+   anywhere today. This is the one capability we cannot cheaply replicate.
+2. **Position inferred from the schema, not from a metadata table.** Retrofit
+   keeps no tracking table: `pg_dump --schema-only | retrofit identify` reports
+   where a database sits in the oplog by reading the schema itself. Our
+   `drizzle journal/db mismatch` failure _is_ a diverged metadata table, and the
+   documented recovery for it is to diagnose a `when` by hand. "Ask the schema"
+   is a strictly better answer for a fleet we do not sit in front of.
+3. **Advisories at authoring time.** `retrofit op add` reports table scans,
+   dependent-code breakage and data loss before any SQL exists, and `migrate`
+   refuses an unrecoverable reverse unless overridden.
+
+**The integration shape, if it ships: Retrofit generates, Drizzle applies.**
+This is the documented adoption path (the Flyway and Rails walkthroughs are
+both "Retrofit writes the migration, the existing tool remains the deployer"),
+and it is the only shape that keeps our boot path — and the ADR-045 publication
+reconcile that runs right after it — untouched:
+
+- **Baseline.** `pg_dump --schema-only | retrofit import - --seal='<version>
+baseline'`, which reads the current schema without replaying our 42
+  migrations. `__drizzle_migrations` is left alone; the oplog starts from the
+  imported point forward.
+- **Per change.** `retrofit op add <Op> …` → review the advisory →
+  `retrofit migrate --from seal~1 --to seal --envelope caller` into the `.sql`
+  file for a migration whose journal entry `drizzle-kit` still writes, so the
+  `when` stays a real `Date.now()` by construction.
+- **Verification.** `retrofit identify` in CI against a freshly migrated scratch
+  DB, asserting the oplog and `schema.ts` agree. That check is the deliverable
+  that would make adoption worth it — it is also writable without Retrofit, as a
+  dump diff.
+
+**Constraints any adoption must respect:**
+
+- **`schema.ts` stays the source of truth for types.** It is consumed as
+  `dist/` across every package, and the Zero sync schema
+  (`packages/shared/src/sync/schema.ts`) is maintained beside it. An oplog that
+  becomes a second schema source is a drift generator, so the evaluation has to
+  answer which artifact is canonical before any oplog is committed. A plausible
+  answer is "oplog for DDL, `schema.ts` for types, CI asserts they agree."
+- **Three things mutate our schema from outside migrations,** and all three will
+  read as drift to `identify`: `FTS_SETUP_SQL` (generated `content_tsv` columns
+  plus GIN and HNSW indexes, re-run after every migration pass),
+  `ensureVectorExtension()` (`CREATE EXTENSION vector`, admin connection, needs
+  SUPERUSER), and `reconcileSyncPublication()` (`friday_pub`, ADR-045). They are
+  deliberately not in migrations. Either the baseline seal swallows them or the
+  evaluation establishes that `drift` can be told to ignore them.
+- **A pre-release, closed-source tool must not land on the boot path.** Under
+  the generate-only shape it is a developer-and-CI dependency that no Deployment
+  ever runs, which is the only exposure acceptable here. If adoption ever
+  requires Retrofit at runtime, this ticket becomes a rejection.
+
+**Exit criteria** — decided when answered, not left open:
+
+1. Under what license and terms, and may we vendor it into CI? Access to the
+   repo is not permission to redistribute it in a build artifact.
+2. Does `import` round-trip our schema? Baseline a scratch DB, then
+   `migrate --from-dump` back onto an empty one and diff the two
+   `pg_dump --schema-only` outputs byte for byte.
+3. Does `identify` survive the three out-of-migration mutators above?
+4. Is a generated `down` correct for the three riskiest migrations in our
+   history (the SQLite-era import, the `bigserial` → `text` PK flip in
+   `ticket_comments`, and the `vector(384)` column)?
+
+Reject on any of 1–3. A yes to all four, and FRI-2057 closes by filing the
+adoption work as its own ticket; the evaluation itself changes no runtime code.
+
+**What this does not do.** It does not harden `migrate.ts`. The back-dated-order
+and `drizzle-kit migrate` hazards above are ours whatever Retrofit turns out to
+be, they are cheap to close, and they should not wait behind a tool that has not
+shipped.
 
 ### FRI-2061 — Stale policy-limits cache on the HOME volume blocks all turns
 

@@ -135,7 +135,14 @@ import {
 import { recordUserBlock } from "../agent/block-injectors.js";
 import { getBlockById } from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
-import { archiveWorkspace, createWorkspace, workspacePath } from "../agent/workspace.js";
+import {
+  archiveWorkspace,
+  createWorkspace,
+  isDaemonOwnedWorkspace,
+  workspacePath,
+  CONTAINER_WORKSPACE_PATH,
+  type WorkspaceOwner,
+} from "../agent/workspace.js";
 import { commandsApi } from "./commands.js";
 import {
   AppInstallError,
@@ -168,6 +175,7 @@ import type { PushSubscribePayload, PresenceReport, NotifyEventType } from "@fri
 import { NOTIFY_EVENT_TYPES } from "@friday/shared";
 import { callerFromRequest, handleHostedMcp, isHostedServer } from "../mcp/host.js";
 import { isRepoAllowed, resolveRepoAllowlist } from "../agent/repo-allowlist.js";
+import { containerModeEnabled } from "../agent/container-runtime.js";
 import {
   isWorkerFacing,
   resolveWorkerListen,
@@ -639,12 +647,23 @@ export const ROUTES: RouteRow[] = [
         a.type === "builder"
           ? ((await registry.getWorkspaceRepo(name)) ?? process.cwd())
           : undefined;
+      // FRI-2080: who owns the directory decides what teardown means. For a
+      // container workspace the volume is the broker's and only the branch is
+      // the daemon's to delete.
+      const workspaceOwner =
+        a.type === "builder" ? ((await registry.getWorkspaceOwner(name)) ?? undefined) : undefined;
       await archiveAgent(name, { reason });
       let workspacePathRemoved: string | undefined;
       if (a.type === "builder") {
         try {
-          workspacePathRemoved = workspacePath(name);
-          archiveWorkspace(name, builderRepo ?? process.cwd(), { branch, repo: builderRepo });
+          workspacePathRemoved = isDaemonOwnedWorkspace(workspaceOwner)
+            ? workspacePath(name)
+            : CONTAINER_WORKSPACE_PATH;
+          archiveWorkspace(name, builderRepo ?? process.cwd(), {
+            branch,
+            repo: builderRepo,
+            owner: workspaceOwner,
+          });
         } catch (err) {
           logger.log("warn", "agent.archive.workspace.fail", {
             agent: name,
@@ -2275,6 +2294,7 @@ async function createAgent(
 
   let workingDirectory = process.cwd();
   let worktreePath: string | undefined;
+  let workspaceOwner: WorkspaceOwner | undefined;
   let branch: string | undefined;
   // PR-271 BLOCKER 1: the original source repo for a builder, persisted on the
   // agent row so the archive route can resolve the correct git dir (the bare
@@ -2308,22 +2328,41 @@ async function createAgent(
 
     builderRepo = repo;
     branch = body.worktree?.branch ?? `friday/${body.name}`;
-    try {
-      const ws = createWorkspace({
-        name: body.name,
-        baseRepo: repo,
+    // FRI-2080: in container mode the workspace is a volume inside the builder
+    // container, so there is no daemon-side worktree to cut — `git worktree
+    // add` needs a gitdir the container can reach, and it cannot reach this
+    // one. The clone that fills `/workspace` is FRI-2076; until it lands a
+    // container Builder gets an empty workspace, which the warn below says
+    // out loud rather than leaving to be discovered mid-turn.
+    if (containerModeEnabled()) {
+      workspaceOwner = "container";
+      workingDirectory = CONTAINER_WORKSPACE_PATH;
+      worktreePath = CONTAINER_WORKSPACE_PATH;
+      logger.log("warn", "builder.workspace.container-not-provisioned", {
+        agent: body.name,
+        repo,
         branch,
-        fromRef: body.worktree?.fromRef,
+        path: CONTAINER_WORKSPACE_PATH,
+        note: "container mode: no repo is served into /workspace yet (FRI-2076)",
       });
-      workingDirectory = ws.path;
-      worktreePath = ws.path;
-    } catch (err) {
-      return {
-        status: 500,
-        body: {
-          error: `workspace creation failed: ${err instanceof Error ? err.message : String(err)}`,
-        },
-      };
+    } else {
+      try {
+        const ws = createWorkspace({
+          name: body.name,
+          baseRepo: repo,
+          branch,
+          fromRef: body.worktree?.fromRef,
+        });
+        workingDirectory = ws.path;
+        worktreePath = ws.path;
+      } catch (err) {
+        return {
+          status: 500,
+          body: {
+            error: `workspace creation failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        };
+      }
     }
   }
 
@@ -2343,7 +2382,9 @@ async function createAgent(
     spawnReason: persistedReason,
     // Persist the builder's source repo so archive can deterministically resolve
     // the teardown git dir (PR-271 BLOCKER 1).
-    metaJson: builderRepo ? { repo: builderRepo } : undefined,
+    metaJson: builderRepo
+      ? { repo: builderRepo, ...(workspaceOwner ? { workspaceOwner } : {}) }
+      : undefined,
   });
 
   // FRI-16: planners inherit their parent's cwd (a planner under a builder
