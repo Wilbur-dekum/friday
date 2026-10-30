@@ -249,12 +249,6 @@ jobs:
     # Run UNLESS the gate explicitly classified the diff as docs-only. The
     # `always() && != 'false'` form is fail-safe: if the gate job errors (its
     # output is then empty, not 'false') the job still runs, so a transient
-    # gate failure can never let untested code merge via a "skipped" → required-
-    # check-satisfied path. Only an explicit `code == 'false'` (every changed
-    # file is *.md) skips it.
-    # Run UNLESS the gate explicitly classified the diff as docs-only. The
-    # `always() && != 'false'` form is fail-safe: if the gate job errors (its
-    # output is then empty, not 'false') the job still runs, so a transient
     # gate failure can never let untested code merge via a "skipped" →
     # required-check-satisfied path. Only an explicit `code == 'false'`
     # (every changed file is *.md) skips it.
