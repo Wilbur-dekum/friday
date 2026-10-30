@@ -207,3 +207,26 @@ describe("worker channel teardown", () => {
     expect(reasons).toEqual(["worker exited"]);
   });
 });
+
+describe("worker channel buffering", () => {
+  it("holds frames that arrive before anything registered onMessage", async () => {
+    // Found by the worker-side transport test, which failed for this reason
+    // and not its own. The worker emits `ready` the instant its socket opens,
+    // which can beat the daemon wiring up a handler — and a dropped `ready`
+    // is a turn that never starts, with nothing in the log to say why.
+    const token = mintWorkerToken({ callerName: "builder-1", callerType: "builder" });
+    const ws = dial(WORKER_CHANNEL_PATH, { authorization: `Bearer ${token}` });
+    await opened(ws);
+    const channel = channels.at(-1)!;
+
+    ws.send(JSON.stringify({ type: "ready" }));
+    ws.send(JSON.stringify({ type: "block-start" }));
+    await new Promise((r) => setTimeout(r, 30));
+
+    const seen: unknown[] = [];
+    channel.onMessage((m) => seen.push(m));
+    // In order, which is the whole reason this is one connection.
+    expect(seen).toEqual([{ type: "ready" }, { type: "block-start" }]);
+    ws.close();
+  });
+});

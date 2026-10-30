@@ -54,6 +54,16 @@ export interface WorkerChannel {
 
 class WsWorkerChannel implements WorkerChannel {
   private messageCb: ((raw: unknown) => void) | undefined;
+  /**
+   * Frames that arrived before a consumer registered `onMessage`.
+   *
+   * A real drop, found by its own test: the worker emits `ready` the moment
+   * its socket opens, which can beat the daemon wiring up its handler. Today's
+   * consumer registers synchronously inside the upgrade callback and so would
+   * have been safe by accident; buffering makes it safe by construction, and
+   * matches what the worker side does with commands arriving early.
+   */
+  private inbox: unknown[] = [];
   private closeCbs: Array<(reason: string) => void> = [];
   private closed = false;
 
@@ -74,7 +84,8 @@ class WsWorkerChannel implements WorkerChannel {
         });
         return;
       }
-      this.messageCb?.(parsed);
+      if (this.messageCb) this.messageCb(parsed);
+      else this.inbox.push(parsed);
     });
     ws.on("close", () => this.fire("closed"));
     ws.on("error", (err) => {
@@ -95,6 +106,7 @@ class WsWorkerChannel implements WorkerChannel {
 
   onMessage(cb: (raw: unknown) => void): void {
     this.messageCb = cb;
+    for (const raw of this.inbox.splice(0)) cb(raw);
   }
 
   onClose(cb: (reason: string) => void): void {

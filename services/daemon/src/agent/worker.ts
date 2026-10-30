@@ -13,6 +13,10 @@
  *
  * MCP servers are reconstructed inside the worker (their config carries a
  * live McpServer instance that can't cross the IPC boundary).
+ *
+ * "IPC" throughout this file means the command/event transport, not
+ * specifically node IPC: a containerised worker (FRI-2038) carries the same
+ * protocol over a WebSocket it dials to the daemon. See `worker-transport.ts`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -30,6 +34,7 @@ import {
   unlockVault,
 } from "@friday/shared";
 import { runMemoryFlush } from "./compact-flush.js";
+import { resolveWorkerTransport } from "./worker-transport.js";
 import { readAttachmentBytes, type MailRow } from "@friday/shared/services";
 import type {
   WorkerAttachment,
@@ -125,8 +130,16 @@ const inFlightFlushes = new Set<string>();
  */
 let probeFired = false;
 
+/**
+ * FRI-2038: node IPC when there is a parent process, a WebSocket to the
+ * daemon's worker-facing listener when there is not (a containerised worker).
+ * Resolved at module load, deliberately: a worker with neither should fail
+ * before it runs a turn whose every event would go nowhere.
+ */
+const transport = resolveWorkerTransport();
+
 function emit(e: WorkerEvent): void {
-  if (process.send) process.send(e);
+  transport.send(e);
 }
 
 function wakeIdle(): void {
@@ -137,7 +150,7 @@ function wakeIdle(): void {
   }
 }
 
-process.on("message", (msg: WorkerCommand) => {
+transport.onCommand((msg: WorkerCommand) => {
   try {
     if (msg.type === "start") {
       if (!workerOpts) {
