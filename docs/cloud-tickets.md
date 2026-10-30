@@ -42,7 +42,7 @@ there is no service or CLI helper that writes that table (see the watch list).
 
 ## FRI-2001 — E1: Dev–cloud parity: the container
 
-`epic` · ADR-050, ADR-051 · 13 tasks
+`epic` · ADR-050, ADR-051 · 18 tasks
 
 Goal: the stack runs as one container (supervisor as PID 1) against external
 Postgres, from the same image the cloud will use.
@@ -400,7 +400,7 @@ shared→dedicated move both inherit this backup-fidelity gap.
 
 ## FRI-2015 — E2: Multi-user in one Deployment
 
-`epic` · ADR-051, ADR-052, ADR-053 · 13 tasks
+`epic` · ADR-051, ADR-052, ADR-053 · 14 tasks
 
 Goal: several Users share one Friday — identity, **Role**, **Scope**, and
 per-User **Conversation**s.
@@ -604,7 +604,7 @@ provider (FRI-2046); settle that before building a per-Deployment mail path.
 
 ## FRI-2029 — E3: Transports
 
-`epic` · ADR-052 · 6 tasks
+`epic` · ADR-052 · 7 tasks
 
 Goal: **Transport** as a first-class concept with per-Transport **Transport
 style**; Slack first.
@@ -1156,7 +1156,7 @@ different kind of path.
 
 ## FRI-2044 — E5: Control plane
 
-`epic` · ADR-051, ADR-052, ADR-053 · 7 tasks
+`epic` · ADR-051, ADR-052, ADR-053 · 8 tasks
 
 Goal: the second application — marketing, registration, billing, legal,
 support, provisioning, fleet upgrade, the central webhook shim, **Usage cap**
@@ -1288,6 +1288,8 @@ there is nothing to orchestrate the upgrade of.
 ---
 
 ## FRI-2068 — E6: Cleanup and backlog
+
+`epic` · 9 tasks
 
 The holding epic for work that is real but blocks no other epic.
 
