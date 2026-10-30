@@ -6,6 +6,7 @@ import { buildAgentsServer, AGENTS_SERVER_NAME } from "./agents.js";
 import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
+import { buildGitHubServer, GITHUB_SERVER_NAME } from "./github.js";
 import { buildHabitServer, HABIT_SERVER_NAME } from "./habit.js";
 import { buildInboxServer, INBOX_SERVER_NAME } from "./inbox.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
@@ -98,6 +99,7 @@ const HOSTED = {
   [REMINDER_SERVER_NAME]: buildReminderServer,
   [ECHO_SERVER_NAME]: () => buildEchoServer(),
   [EVOLVE_SERVER_NAME]: buildEvolveServer,
+  [GITHUB_SERVER_NAME]: buildGitHubServer,
   [INBOX_SERVER_NAME]: buildInboxServer,
   [INTEGRATIONS_SERVER_NAME]: buildIntegrationsServer,
   [MAIL_SERVER_NAME]: buildMailServer,

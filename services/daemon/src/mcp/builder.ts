@@ -37,6 +37,7 @@ import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildHabitServer, HABIT_SERVER_NAME } from "./habit.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
+import { GITHUB_SERVER_NAME } from "./github.js";
 import { buildInboxServer, INBOX_SERVER_NAME } from "./inbox.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 import { buildElicitationServer, ELICITATION_SERVER_NAME } from "./elicitation.js";
@@ -105,6 +106,21 @@ function hostedOr(
   fallback: () => McpSdkServerConfigWithInstance,
 ): McpHttpServerConfig | McpSdkServerConfigWithInstance {
   if (!useHostedMcp()) return fallback();
+  return hostedServerConfig(name, opts);
+}
+
+/**
+ * Point a server at its daemon-hosted endpoint, with no in-process option.
+ *
+ * Extracted from `hostedOr` for servers that must NEVER be built in the
+ * worker — `friday-github` holds a credential whose entire purpose is to stay
+ * out of the process running untrusted repository code, so a fallback would
+ * defeat the server rather than de-risk it.
+ */
+function hostedServerConfig(
+  name: HostedServerName,
+  opts: BuildMcpServersOptions,
+): McpHttpServerConfig {
   return {
     type: "http",
     url: `${resolveDaemonBaseUrl(opts.daemonPort)}${hostedServerPath(name)}`,
@@ -207,6 +223,17 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     servers[TICKETS_SERVER_NAME] = hostedOr(TICKETS_SERVER_NAME, opts, () =>
       buildTicketsServer(ctx),
     );
+  }
+
+  // friday-github: builders only (FRI-2078). It is the one agent type with a
+  // branch and a repo on its row, and the route resolves both from there —
+  // an orchestrator calling `pr_create` has nothing to open a PR from.
+  //
+  // ALWAYS hosted, with no `hostedOr` in-process fallback. The whole point is
+  // that the GitHub credential stays out of the process running untrusted
+  // repository code; an in-process variant would hand it straight back.
+  if (opts.callerType === "builder") {
+    servers[GITHUB_SERVER_NAME] = hostedServerConfig(GITHUB_SERVER_NAME, opts);
   }
 
   // friday-schedule: orchestrator only.
