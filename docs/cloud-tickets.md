@@ -1087,7 +1087,18 @@ Builder's un-pushed work there is wrong regardless of ordering. The options
 are therefore: forward synchronously so nothing local has to survive; narrow
 the mirror's refspec so it stops being a mirror; or land incoming pushes in a
 per-assignment staging repo the daemon never prunes — the same per-task shape
-FRI-2038 already uses for volumes. Decide this before writing code.
+FRI-2038 already uses for volumes.
+
+**DECIDED (2026-10-30): the per-assignment staging repo.** It is the only one
+where the invariant holds rather than races — the mirror stays a pure cache of
+upstream and is free to prune, while the Builder's un-forwarded work lives
+somewhere nothing prunes. The other two each keep a window in which a push
+exists only in a mirror that is defined to discard it.
+
+So the shape is: a bare repo per assignment (sibling to the per-task volume),
+`git-receive-pack` served against THAT rather than the mirror, the `update`
+gate refusing anything but `friday/<agent>`, and a `post-receive` forwarding
+to the real origin. Teardown follows the assignment, like the volume does.
 
 ### FRI-2078 — Host PR creation and CI checks daemon-side
 
