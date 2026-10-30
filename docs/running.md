@@ -331,18 +331,49 @@ Two places the container boundary is lossy, stated rather than papered over:
   `worker.abort.descendants-killed` logs `null` — not `0`, which would read as
   "nothing was running".
 
-**Not wired yet: the worktree.** Everything above is the transport and
+**The worktree is the remaining gap.** Everything above is the transport and
 lifecycle — a worker can be created, driven and stopped as a container. A
-_Builder_ additionally needs its worktree, and `createWorkspace` still runs in
-the daemon process against the daemon's own `workspaces/` root, which a
-builder container's `/workspace` volume is not. Mounting the daemon's data dir
-into the container is the wrong fix: it hands the process running untrusted
-repository code a path straight past the boundary FRI-2062 drew. So the
-worktree has to be created _inside_ the container, which needs credentials
-reaching the repo from there — the half of FRI-2041 that is waiting on a
-GitHub App (FRI-2056). There is also no image whose entrypoint is the worker
-yet; `BROKER_BUILDER_IMAGE` currently names the dev image, whose `CMD` is
-`bash`.
+_Builder_ additionally needs its worktree, and `createWorkspace` cuts a
+`git worktree` against a git dir on the daemon's filesystem, which a builder
+container's `/workspace` volume is not. Mounting the daemon's data dir into
+the container is the wrong fix: it hands the process running untrusted
+repository code a path straight past the boundary FRI-2062 drew.
+
+So the worktree is created _inside_ the container, from a repo the **daemon
+serves** over the worker-facing listener rather than one the container clones
+from the real origin — the only option that works for a local-path repo (the
+common case, since `worktree.repo` defaults to the daemon's cwd), and the one
+that keeps any repo credential out of the container entirely. `gh pr create`
+and `gh pr checks` are GitHub API calls a git route cannot serve, so those
+move daemon-side as an MCP server instead of a token in the container.
+FRI-2076–2080 carry the work, sequenced as 2080 → 2076 → 2077 with 2078 and
+2079 independent.
+
+**Landed (FRI-2080): the daemon knows a workspace may not be its own.** A
+Builder's row records `meta_json.workspaceOwner` — `daemon` for a
+`git worktree` under `<DATA_DIR>/workspaces/<name>`, `container` for a volume
+at `/workspace`. An absent value reads as `daemon`, so every row written
+before this keeps its meaning. Three consumers honour it:
+
+- The invariant auditor and the boot recovery scan skip their
+  `existsSync(worktreePath)` rule for container-owned workspaces. Without
+  that, `/workspace` is invisible to the daemon and **every** containerised
+  Builder is archived as an orphan on the first audit tick, and every tick
+  after — a false alarm loud enough to train people to ignore a real one.
+- `archiveWorkspace` skips the worktree removal and the directory wipe (the
+  volume is the broker's to tear down) and still deletes the branch, which
+  really is the daemon's once FRI-2077 forwards pushes. It derives the path
+  from the agent _name_, so skipping also stops a container Builder from
+  `rm -rf`-ing a leftover daemon worktree that reused the same name.
+- The workspace guard keeps reading the path as its containment root, which
+  is correct: the guard runs in the worker, where `/workspace` is real.
+
+**Still missing:** the repo in `/workspace` (FRI-2076) and an image whose
+entrypoint is the worker (FRI-2079) — `BROKER_BUILDER_IMAGE` currently names
+the dev image, whose `CMD` is `bash`. Spawning a Builder with container mode
+on logs `builder.workspace.container-not-provisioned` and gives it an empty
+workspace rather than failing, so the gap shows up in the log instead of being
+discovered mid-turn.
 
 ### Hostname and the reverse proxy
 

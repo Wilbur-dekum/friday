@@ -361,6 +361,18 @@ export function makeContainerRuntime(broker: BrokerConfig): WorkerRuntime {
 }
 
 /**
+ * Whether workers run as containers.
+ *
+ * The same answer `resolveWorkerRuntime` acts on, exported because the spawn
+ * route needs it too — it decides who owns a Builder's workspace. One
+ * predicate rather than two readings of the environment, so the runtime and
+ * the workspace can never disagree about which world they are in.
+ */
+export function containerModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return resolveBrokerConfig(env) !== null;
+}
+
+/**
  * Which runtime this daemon uses.
  *
  * Container mode is opt-in by configuration, not by platform: a laptop and a

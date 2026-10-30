@@ -11,6 +11,7 @@ import {
 } from "@friday/shared";
 import { captureFor } from "../posthog.js";
 import { logger } from "../log.js";
+import type { WorkspaceOwner } from "./workspace.js";
 
 /**
  * FRI-113: status state machine. Every write to `agents.status` flows
@@ -239,6 +240,25 @@ export async function getWorkspaceRepo(name: string): Promise<string | null> {
     .limit(1);
   const meta = rows[0]?.metaJson as { repo?: unknown } | null | undefined;
   return meta && typeof meta.repo === "string" && meta.repo.length > 0 ? meta.repo : null;
+}
+
+/**
+ * Read who owns a builder's workspace directory (`meta_json.workspaceOwner`).
+ *
+ * FRI-2080. Returns null when absent — every builder row written before this
+ * is daemon-owned, which is what `isDaemonOwnedWorkspace` defaults to.
+ */
+export async function getWorkspaceOwner(name: string): Promise<WorkspaceOwner | null> {
+  const db = getDb();
+  const rows = await db
+    .select({ metaJson: schema.agents.metaJson })
+    .from(schema.agents)
+    .where(eq(schema.agents.name, name))
+    .limit(1);
+  const meta = rows[0]?.metaJson as { workspaceOwner?: unknown } | null | undefined;
+  return meta?.workspaceOwner === "container" || meta?.workspaceOwner === "daemon"
+    ? meta.workspaceOwner
+    : null;
 }
 
 /**

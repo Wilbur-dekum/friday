@@ -18,6 +18,7 @@
 import { existsSync } from "node:fs";
 import { logger } from "../log.js";
 import * as registry from "./registry.js";
+import { isDaemonOwnedWorkspace } from "./workspace.js";
 import { archiveAgent, healAgentStatus, isAgentLive, setAgentProjection } from "./lifecycle.js";
 
 const AUDIT_INTERVAL_MS = 60_000;
@@ -93,11 +94,17 @@ export async function audit(): Promise<{
     // Rule 1: builder worktree presence. Filesystem is the source of
     // truth — if the dir is gone, the agent can't function and the
     // registry row was lying.
+    // FRI-2080: a container-owned workspace is a volume at `/workspace` inside
+    // a builder container. The daemon cannot see it, so `existsSync` would be
+    // false for every one of them and this rule would archive every
+    // containerised Builder on sight. "I cannot see it" and "it is gone" are
+    // different facts; only the second one means the Builder is broken.
     if (
       a.type === "builder" &&
       a.status !== "archived" &&
       "worktreePath" in a &&
       a.worktreePath &&
+      isDaemonOwnedWorkspace(await registry.getWorkspaceOwner(a.name)) &&
       !existsSync(a.worktreePath)
     ) {
       logger.log("warn", "invariant.archive-orphan", {

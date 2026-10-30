@@ -91,6 +91,47 @@ describe("invariant auditor", () => {
     expect((await registry.getAgent("healthy-1"))?.status).toBe("idle");
   });
 
+  it("Rule 1: leaves a CONTAINER-owned builder alone, path invisible or not", async () => {
+    // FRI-2080. A container workspace is a volume at `/workspace` inside the
+    // builder container, so `existsSync` is false for every one of them on
+    // the daemon. Without the ownership check this rule archives every
+    // containerised Builder on its first audit tick — and then keeps doing
+    // it, which is a false alarm loud enough to train people to ignore a
+    // real one.
+    await registry.registerAgent({
+      name: "boxed-1",
+      type: "builder",
+      parentName: "friday",
+      worktreePath: "/workspace",
+      branch: "friday/boxed-1",
+      metaJson: { repo: "https://github.com/acme/web", workspaceOwner: "container" },
+    });
+    // `idle`, not `working`: rule 2 ("working ⇒ live") would demote a working
+    // row with no live worker and muddy what this case is about.
+    await registry.setStatus("boxed-1", "idle");
+
+    const result = await audit();
+
+    expect(result.archived).not.toContain("boxed-1");
+    expect((await registry.getAgent("boxed-1"))?.status).toBe("idle");
+  });
+
+  it("Rule 1: still archives a DAEMON-owned builder that says so explicitly", async () => {
+    // The control for the case above: an explicit `daemon` owner must behave
+    // exactly like the absent one, or old rows and new rows diverge.
+    await registry.registerAgent({
+      name: "ghost-explicit",
+      type: "builder",
+      parentName: "friday",
+      worktreePath: join(workspaceRoot, "ghost-explicit"),
+      branch: "friday/ghost-explicit",
+      metaJson: { repo: process.cwd(), workspaceOwner: "daemon" },
+    });
+    await registry.setStatus("ghost-explicit", "working");
+
+    expect((await audit()).archived).toContain("ghost-explicit");
+  });
+
   it("Rule 1: already-archived builders with missing worktrees are left alone", async () => {
     const worktreePath = join(workspaceRoot, "already-gone");
     await registry.registerAgent({
