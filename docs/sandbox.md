@@ -187,6 +187,32 @@ network, which is currently unrestricted.
 The full rewrite of this document around cgroups and container lifetime is
 FRI-2043. This section is the interim honest account, not that rewrite.
 
+## The Claude Code child's environment (FRI-2059)
+
+FRI-2012 established that the boundary worth defending is **one level deeper
+than the worker**. The worker is Friday's own code: it reaches the database,
+and it deliberately carries the full daemon environment. The Claude Code child
+it spawns is a different matter — the agent's Bash tool, and everything that
+tool spawns, inherit that child's environment, and that is where untrusted
+repository code actually runs.
+
+That child was receiving raw `process.env`. It now receives
+`claudeCodeChildEnv()`, which applies the same deny-list the shell capture
+uses (`isSecretKey`) with one named exception. Stopping at the boundary:
+`DATABASE_URL`, `ZERO_UPSTREAM_DB`, `FRIDAY_ADMIN_DATABASE_URL` — the
+superuser connection that on ADR-051's shared cluster reaches every
+Organization's database — the age identity that decrypts the whole vault,
+`SSH_AUTH_SOCK`, and `GITHUB_TOKEN`.
+
+**The exception, and its residual risk.** The CLI cannot authenticate without
+`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`, so
+those three pass through — and because a process inherits what its parent
+holds, they reach the Bash tool too. We cannot scrub a process we do not
+spawn. Narrowing this further means a credential proxy the CLI talks to rather
+than a longer list, which is why a test caps the exception set at four entries
+and requires every entry to be secret-shaped: an exception that excepts
+nothing makes the list look like it is doing more than it is.
+
 ## Adversarial review — residual risk
 
 The 2026-05-13 review surfaced three classes of weakness that did not

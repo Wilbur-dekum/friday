@@ -58,7 +58,7 @@ import { daemonFetch } from "../mcp/http.js";
 import { runHooks } from "@friday/shared";
 import "../hooks/register.js";
 import { denyBuiltinAskUserQuestion } from "../hooks/block-builtin-ask-user-question.js";
-import { captureShellEnv, getResolvedShellEnv } from "../shell-env.js";
+import { captureShellEnv, claudeCodeChildEnv, getResolvedShellEnv } from "../shell-env.js";
 import { logger } from "../log.js";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
@@ -531,7 +531,14 @@ export function buildQueryOptions(
     // overlay — intended: it's the user's box and their interactive shell wins,
     // same as if they ran `claude` in their terminal. `shellEnv` omitted (tests)
     // → no `env` override, identical to prior behavior.
-    ...(shellEnv ? { env: { ...process.env, ...shellEnv } } : {}),
+    // FRI-2059: `claudeCodeChildEnv()`, NOT raw `process.env`. The worker
+    // deliberately carries the full daemon environment (FRI-2012) — it is
+    // Friday's own code and reaches the database — but the Claude Code child
+    // is the boundary, because its Bash tool runs untrusted repository code.
+    // DATABASE_URL, the age identity, SSH_AUTH_SOCK and the superuser
+    // connection all stop here; the CLI's own Anthropic credentials do not,
+    // because it cannot authenticate without them.
+    ...(shellEnv ? { env: { ...claudeCodeChildEnv(), ...shellEnv } } : {}),
     // Drop Anthropic's built-in `Task` sub-agent tool from the catalog for
     // every agent type. Friday farms work out via `agent_create` + mail, not
     // SDK Task. See the doc-comment above.
