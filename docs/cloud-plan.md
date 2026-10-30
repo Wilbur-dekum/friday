@@ -120,7 +120,7 @@ prerequisite — which is what keeps E3 off the Control plane's critical path.
 
 ### E4 — Agent isolation
 
-FRI-2036 · tasks FRI-2037–2043
+FRI-2036 · tasks FRI-2037–2043, 2059, 2062, 2071–2080
 
 **Goal.** Agent execution moves into containers; the container is the sandbox.
 **Done when** builders run in per-task containers with egress deny-by-default, and the
@@ -131,6 +131,11 @@ remaining four [ADR-054](decisions.md) controls are in place.
 Builders first, per-turn worker containers as the declared destination. The worker boundary
 is built as a protocol seam from the start — `wakeAgent` is IPC and `killDescendantTree`
 walks `pgrep -P`, so both become a network protocol and a container lifecycle.
+
+FRI-2038 delivered the transport and lifecycle, not a working Builder: a Builder also needs
+its worktree, and the daemon creates worktrees on its own filesystem. FRI-2076–2080 close
+that, and they sequence as 2080 (the path split) → 2076 (the daemon serves the repo) →
+2077 (pushes forward through it), with 2078 and 2079 independent of all three.
 
 ### E5 — Control plane
 

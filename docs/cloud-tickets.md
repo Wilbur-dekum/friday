@@ -705,7 +705,7 @@ local tool-execution bridge is a much larger design and should be split out.
 
 ## FRI-2036 — E4: Agent isolation
 
-`epic` · ADR-054 · 7 tasks
+`epic` · ADR-054 · 19 tasks
 
 Goal: agent execution moves into containers; the container is the sandbox.
 
@@ -1011,6 +1011,123 @@ per-task containers (FRI-2038) do. Do not claim otherwise.
 All three are required for FRI-2038 regardless of their individual merits: per
 FRI-2072, a server still built in the worker fails with ECONNREFUSED the moment
 the worker is containerised.
+
+### FRI-2076 — The daemon serves the repo into a builder container
+
+`task` · parent FRI-2036 · ADR-054
+
+FRI-2038 landed the transport and lifecycle; this is the part that makes a
+_Builder_ possible. Both of `createWorkspace`'s modes end in `git worktree add`
+against a `gitDir` on the daemon's filesystem — a local checkout, or the bare
+`--mirror` under `<DATA_DIR>/repos/`. A container cannot hold a worktree whose
+gitdir lives outside its volume, and the obvious shortcut is worse than the
+problem: mounting the daemon's data dir into the builder container hands the
+process running untrusted repository code a path straight past the boundary
+FRI-2062 accepted and FRI-2038 exists to draw.
+
+So the daemon serves the repo — `git http-backend` behind a worker-facing route
+— and the container clones from it. Three reasons this and not a clone from the
+real origin:
+
+1. It works for a **local-path** repo, which is the common case rather than an
+   edge one: `worktree.repo` defaults to the daemon's cwd, and a container has
+   no way to clone a path on another host's filesystem.
+2. No repo credential enters the container, for reads or writes.
+3. The authorization decision stays where FRI-2041 put it: the route serves
+   **only** the repo authorized for that task, so the allowlist is enforced by
+   what is reachable rather than by what the clone command happens to say.
+
+Scope the route per task and derive the repo from the per-worker token, not from
+a parameter — the same reasoning as `callerFromRequest` (FRI-2037). It is a new
+worker-facing route, so it belongs in `WORKER_FACING_ROUTES` with its reason.
+
+### FRI-2077 — Forward a builder's pushes through the daemon
+
+`task` · parent FRI-2036 · ADR-054
+
+With FRI-2076 the clone's `origin` is the daemon, so `git push` lands in the
+daemon's `gitDir` and something has to carry it the rest of the way. Good: the
+GitHub credential then lives in the trusted tier and never enters the process
+running untrusted repository code. For a local-path repo nothing changes at all
+— a Builder's push already rides the daemon machine's git config today, because
+its worktree shares the daemon's origin.
+
+A `post-receive` hook in the daemon's `gitDir` is the forwarder, and it is also
+the gate: **only refs matching the Builder's own `friday/<agent>` branch may be
+forwarded.** That is a code gate — testable, logged, attributable to a User per
+ADR-051/ADR-053 — replacing a prompt rule that currently asks a Builder not to
+push to `main`. Note this hook is daemon-side code we own and is unrelated to
+FRI-2042's deny-list, which is about hooks inside the _container's_ clone.
+
+**The hazard to design around, because it loses work silently:** `ensureMirror`
+refreshes with `git remote update --prune`, and a `--mirror` clone's refspec is
+`+refs/*:refs/*`. A Builder branch sitting in the mirror but not yet forwarded
+to GitHub **is pruned** by the next `createWorkspace` against that mirror.
+Forward before any prune can run, or keep incoming pushes in a separate ref
+namespace the mirror refspec does not cover. Do not leave the ordering implicit.
+
+### FRI-2078 — Host PR creation and CI checks daemon-side
+
+`task` · parent FRI-2036 · ADR-054
+
+The builder persona has Builders run `gh pr create` and then gate "done" on
+`gh pr checks <n> --watch`. Those are GitHub **API** calls, not git, so
+FRI-2076's git route cannot serve them and FRI-2077's forwarder does not reach
+them. Without this, a containerised Builder can write code and push it and
+still cannot finish.
+
+A daemon-hosted MCP server — the fourteenth, alongside the thirteen FRI-2073
+and FRI-2075 moved — with the token daemon-side and the Builder calling tools
+instead of shelling out. Two things that buys beyond credential placement: the
+daemon can gate which repo and which base branch a PR may target, and the
+"halt at a green PR, never merge" rule stops being a prompt instruction a model
+may reinterpret and becomes a tool that has no merge operation.
+
+This is the asymptote principle applied to a recurring shape rather than a
+one-off: every Builder does exactly this, every time.
+
+Supersedes the need for a container-side GitHub token, so it also keeps
+`api.github.com` off the egress allowlist FRI-2039 has to write.
+
+### FRI-2079 — A builder image whose entrypoint is the worker
+
+`task` · parent FRI-2036 · ADR-054
+
+`BROKER_BUILDER_IMAGE` currently names the dev image, whose `CMD` is `bash` —
+so a builder container today starts, runs a shell, and never dials the command
+channel. Needs a stage whose entrypoint is `worker.js`, carrying git and the
+Agent SDK's bundled `claude` binary.
+
+Two traps already paid for elsewhere apply here. The **musl build must stay
+out** (the SDK picks musl on a glibc image and fails with `ENOENT` for the
+missing loader, which it reports as the misleading "native binary not found" —
+see the Dockerfile's existing prune and assertion). And the stage **must name
+its target explicitly** at every build site: Docker defaults to the last stage,
+which is how the Deployment silently became the dev image once already.
+
+### FRI-2080 — Split the workspace path: a clone at `/workspace`, not a worktree
+
+`task` · parent FRI-2036 · ADR-054
+
+The container path produces a **clone**, not a worktree, and three daemon-side
+consumers assume otherwise. This is the ticket that keeps FRI-2076 from
+breaking things that currently work.
+
+- `archiveWorkspace` unregisters a worktree in `gitDir` and would have nothing
+  to unregister; the volume is the broker's to tear down.
+- The continuous invariant auditor (`agent/invariants.ts`) and the boot check
+  in `index.ts` both do `existsSync(a.worktreePath)` for every Builder.
+  `/workspace` never exists on the daemon's filesystem, so **every**
+  containerised Builder would trip the auditor, continuously, forever — a
+  false alarm loud enough to train people to ignore a real one.
+- The workspace guard reads the path as the containment root, and there it is
+  correct: the guard runs in the worker, where `/workspace` is real. Keep that
+  distinction explicit, because it is the one place the container-relative path
+  is the right value.
+
+Prefer recording which runtime owns the path over sprinkling `existsSync`
+guards — a path the daemon cannot see is not an error to tolerate, it is a
+different kind of path.
 
 ---
 
