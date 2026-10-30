@@ -473,15 +473,16 @@ export interface ArchiveWorkspaceOptions {
 }
 
 /**
- * Deterministically resolve the git dir `archiveWorkspace` must operate on,
- * given the original source `repo`. Mirrors `createWorkspace`'s `gitDir`
- * derivation exactly so create and teardown always agree on the target:
+ * Deterministically resolve the git dir for a source `repo`.
+ *
+ * Mirrors `createWorkspace`'s `gitDir` derivation exactly so create, teardown
+ * and — since FRI-2076 — SERVING all agree on the target:
  *   - LOCAL repo (an on-disk working tree) → the repo path itself.
  *   - REMOTE (a URL / bare repo / missing path) → the bare mirror under
  *     `<DATA_DIR>/repos/`. It does NOT matter whether the local checkout the
  *     URL might point at exists; remote mode ALWAYS targets the mirror.
  */
-function resolveArchiveGitDir(repo: string): string {
+export function resolveRepoGitDir(repo: string): string {
   return isLocalRepo(repo) ? repo : mirrorPathForRemote(repo);
 }
 
@@ -580,7 +581,7 @@ export function archiveWorkspace(
   // In remote mode (1) always targets the bare mirror and NEVER `process.cwd()`.
   const daemonOwned = isDaemonOwnedWorkspace(opts.owner);
   const gitDir = opts.repo
-    ? resolveArchiveGitDir(opts.repo)
+    ? resolveRepoGitDir(opts.repo)
     : // The in-workspace marker is only readable when the daemon can see the
       // directory, which for a container workspace it cannot.
       ((daemonOwned ? readWorkspaceGitDir(path) : null) ?? baseRepo);

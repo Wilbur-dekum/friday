@@ -59,6 +59,18 @@ export const WORKER_FACING_ROUTES: readonly WorkerRoute[] = [
     reason: "worker.ts fetchInboxQuiet drains the agent's mail at turn start",
   },
   {
+    method: "GET",
+    match: (p) => p === "/api/worker/git/info/refs",
+    reason:
+      "FRI-2076: the ref advertisement for the clone that fills /workspace — " +
+      "a containerised Builder cannot hold a worktree whose gitdir is outside it",
+  },
+  {
+    method: "POST",
+    match: (p) => p === "/api/worker/git/git-upload-pack",
+    reason: "FRI-2076: the fetch half of that clone. No receive-pack — push is FRI-2077",
+  },
+  {
     method: "POST",
     match: (p) => p === "/api/elicitation/wait",
     reason:
