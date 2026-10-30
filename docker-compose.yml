@@ -191,6 +191,39 @@ services:
       # every Conversation silently starts fresh on each deploy (FRI-2007).
       - friday-home:/home/friday
 
+  # FRI-2038: the builder broker — the ONLY component holding the Docker
+  # socket. Behind a profile, so it never starts unless asked for.
+  #
+  # The socket is host-root equivalent. Mounting it into the `friday` service
+  # would give it to the container that also runs the unsandboxed
+  # orchestrator, so anything escaping into the Deployment would escape the
+  # host — gutting the boundary FRI-2062 decided and FRI-2072 reinforced.
+  # Here it sits in a process whose whole API is "start a builder", with the
+  # image, mounts, limits and privileges fixed by broker config rather than by
+  # its caller. See services/builder-broker/broker.mjs.
+  #
+  # Dependency-free by design: a privileged process is the last place to
+  # inherit an npm tree, so it runs the plain node image against a mounted
+  # source file and installs nothing.
+  builder-broker:
+    image: node:22.21.1-bookworm-slim
+    profiles: ["builders"]
+    command: ["node", "/srv/broker.mjs"]
+    environment:
+      BROKER_TOKEN: ${BROKER_TOKEN:-dev-broker-token}
+      BROKER_BUILDER_IMAGE: friday-dev:latest
+      BROKER_BUILDER_NETWORK: friday_default
+      BROKER_PORT: 7612
+    volumes:
+      - ./services/builder-broker/broker.mjs:/srv/broker.mjs:ro
+      # The privilege, scoped to this container alone.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Not published to the host: the daemon reaches it over the compose
+    # network. Nothing outside the Deployment should be able to ask for a
+    # builder.
+    expose:
+      - "7612"
+
   # FRI-2071: the development container type. NOT part of `docker compose up` —
   # it sits behind a profile so it can never start alongside the Deployment.
   #
