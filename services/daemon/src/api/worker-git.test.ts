@@ -35,6 +35,7 @@ let tokens: typeof import("../agent/worker-tokens.js");
 let handleWorkerGit: (typeof import("./worker-git.js"))["handleWorkerGit"];
 let gitVerbFor: (typeof import("./worker-git.js"))["gitVerbFor"];
 let WORKER_GIT_PREFIX: string;
+let workspaceMod: typeof import("../agent/workspace.js");
 
 let server: Server;
 let baseUrl: string;
@@ -46,6 +47,7 @@ beforeAll(async () => {
   registry = await import("../agent/registry.js");
   tokens = await import("../agent/worker-tokens.js");
   ({ handleWorkerGit, gitVerbFor, WORKER_GIT_PREFIX } = await import("./worker-git.js"));
+  workspaceMod = await import("../agent/workspace.js");
 });
 
 afterAll(async () => {
@@ -164,6 +166,29 @@ describe("serving a Builder its repo", () => {
     const dest = join(scratch, "clone-own");
     await cloneAs(token, dest);
     expect(readFileSync(join(dest, "hello.txt"), "utf8")).toBe("from the daemon\n");
+  });
+});
+
+describe("when git-http-backend itself fails", () => {
+  it("relays its STATUS, and does not leak the server path in the body", async () => {
+    // A half-created mirror: `ensureMirror` crashed mid-clone and left a
+    // directory that is not a valid repo. `isLocalRepo` sends a remote URL
+    // down the mirror path, the directory exists so the pre-flight passes,
+    // and `git-http-backend` answers `Status: 404` with the body "Not a git
+    // repository: /Users/…" — the wrong HTTP status to drop on the floor,
+    // and a piece of the daemon's filesystem layout to hand the container
+    // running untrusted code.
+    const remote = "https://github.com/acme/half-cloned";
+    const mirror = workspaceMod.mirrorPathForRemote(remote);
+    mkdirSync(mirror, { recursive: true });
+    const token = await builderWithRepo("builder-1", remote);
+
+    const res = await refs(token);
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect(text).not.toContain(mirror);
+    expect(text).not.toMatch(/Not a git repository/);
+    expect(JSON.parse(text)).toEqual({ error: "repository is not available" });
   });
 });
 
