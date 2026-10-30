@@ -3,6 +3,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { hostedServerNames, hostedServerPath, isHostedServer } from "./host.js";
+import { ELICITATION_SERVER_NAME } from "./elicitation.js";
+import { isWorkerFacing } from "../api/worker-listener.js";
 
 /**
  * FRI-2074: a hosted server must only read `extra` fields the MCP transport
@@ -82,5 +84,43 @@ describe("hosted MCP servers are transport-portable", () => {
     // fires; this one keeps the REASON discoverable from the test file.
     expect(isHostedServer("friday-elicitation")).toBe(false);
     expect(sourceOf("elicitation.ts")).toContain("toolUseId");
+  });
+});
+
+describe("friday-elicitation stays in-process, deliberately (FRI-2074)", () => {
+  /**
+   * The one server that is NOT hosted, recorded as a decision so it does not
+   * read as an oversight — and so a future "let's finish the migration" pass
+   * has to delete this test rather than discover the reason by breaking it.
+   *
+   * MEASURED, in FRI-2074: hosted, every `ask_user` fails with `ask_user
+   * invoked without a tool_use_id`. The elicitation id IS `extra.toolUseId` —
+   * the value the dashboard SSE event, the submit POST and the canonical
+   * `tool_use` block all key on. `createSdkMcpServer` injects it because it
+   * runs in-process; the standard MCP transport's `extra` carries
+   * `requestId` and `signal` and no `toolUseId`, because tool_use_id is an
+   * Anthropic-API concept rather than an MCP one.
+   *
+   * Hosting it would buy none of what hosting is FOR. The other thirteen
+   * moved to get a privileged tool surface out of the process running
+   * untrusted repository code (docs/sandbox.md residual risk #1). `ask_user`
+   * holds no credential, reads no state and does nothing privileged — it
+   * blocks on a human. Leaving it in-process leaks nothing.
+   *
+   * Container reachability, the other objection, is already handled:
+   * `POST /api/elicitation/wait` is in `WORKER_FACING_ROUTES` (FRI-2072), so
+   * a worker in its own container reaches the long-poll over the same
+   * token-gated listener as everything else.
+   */
+  it("is not in the hosted registry", () => {
+    expect(isHostedServer(ELICITATION_SERVER_NAME)).toBe(false);
+    expect(hostedServerNames()).not.toContain(ELICITATION_SERVER_NAME);
+  });
+
+  it("is reachable from a container, which is why it can stay in-process", () => {
+    // The decision rests on this. If the long-poll ever stops being
+    // worker-facing, a containerised agent silently loses `ask_user` and the
+    // reasoning above expires with it.
+    expect(isWorkerFacing("POST", "/api/elicitation/wait")).toBe(true);
   });
 });
