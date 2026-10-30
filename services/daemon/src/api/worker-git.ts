@@ -207,9 +207,25 @@ export async function handleWorkerGit(ctx: {
   let pending = Buffer.alloc(0);
   let headersSent = false;
   let stderr = "";
+  /**
+   * A non-200 from the CGI, whose body is swallowed rather than relayed.
+   *
+   * `git-http-backend` reports its own failures as a `Status:` header, and its
+   * message names the server-side path — `Not a git repository:
+   * /Users/…/repos/acme.git`. Reachable: a row whose `repo` points at a
+   * directory that exists but is not a repo. Relaying it would hand the
+   * container running untrusted code a piece of the daemon's filesystem
+   * layout, so the real message goes to the log and the worker gets a
+   * generic one.
+   */
+  let cgiError: { status: number; detail: string } | null = null;
 
   child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
   child.stdout.on("data", (chunk: Buffer) => {
+    if (cgiError) {
+      if (cgiError.detail.length < 2000) cgiError.detail += chunk.toString("utf8");
+      return;
+    }
     if (headersSent) {
       res.write(chunk);
       return;
@@ -217,12 +233,31 @@ export async function handleWorkerGit(ctx: {
     pending = Buffer.concat([pending, chunk]);
     const split = splitCgi(pending);
     if (!split) return;
-    headersSent = true;
+
+    // `Status: 404 Not Found` is CGI's way of setting the HTTP status. Left
+    // in the header loop it became a response HEADER named "Status" and the
+    // reply went out 200 — an error reported as success, which is the shape
+    // of bug that costs an afternoon.
+    let status = 200;
+    const headers: Array<[string, string]> = [];
     for (const line of split.headers.split(/\r?\n/)) {
       const idx = line.indexOf(":");
-      if (idx > 0) res.setHeader(line.slice(0, idx).trim(), line.slice(idx + 1).trim());
+      if (idx <= 0) continue;
+      const name = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (name.toLowerCase() === "status") {
+        status = Number.parseInt(value, 10) || 500;
+        continue;
+      }
+      headers.push([name, value]);
     }
-    res.writeHead(200);
+    if (status !== 200) {
+      cgiError = { status, detail: split.body.toString("utf8") };
+      return;
+    }
+    headersSent = true;
+    for (const [name, value] of headers) res.setHeader(name, value);
+    res.writeHead(status);
     if (split.body.length > 0) res.write(split.body);
   });
   child.on("error", (err) => {
@@ -234,6 +269,18 @@ export async function handleWorkerGit(ctx: {
     else res.end();
   });
   child.on("close", (code) => {
+    if (cgiError) {
+      logger.log("warn", "worker.git.backend.status", {
+        agent: identity.callerName,
+        verb,
+        gitDir,
+        status: cgiError.status,
+        // The real message, which names server paths — logged, never relayed.
+        detail: cgiError.detail.trim().slice(0, 300),
+      });
+      writeJson(res, cgiError.status, { error: "repository is not available" });
+      return;
+    }
     if (!headersSent) {
       // No headers means it failed before producing any CGI output at all, so
       // the stderr is the only explanation there will be.
