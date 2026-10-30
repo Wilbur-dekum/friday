@@ -368,12 +368,43 @@ before this keeps its meaning. Three consumers honour it:
 - The workspace guard keeps reading the path as its containment root, which
   is correct: the guard runs in the worker, where `/workspace` is real.
 
-**Still missing:** the repo in `/workspace` (FRI-2076) and an image whose
-entrypoint is the worker (FRI-2079) — `BROKER_BUILDER_IMAGE` currently names
-the dev image, whose `CMD` is `bash`. Spawning a Builder with container mode
-on logs `builder.workspace.container-not-provisioned` and gives it an empty
-workspace rather than failing, so the gap shows up in the log instead of being
-discovered mid-turn.
+**Landed (FRI-2079): the builder image.** `BROKER_BUILDER_IMAGE` used to name
+the dev image, whose `CMD` is `bash` — a builder container started, ran a
+shell, and never dialled the command channel. There is now a `worker` stage
+whose entrypoint is the worker itself, because the container _is_ one worker:
+
+```bash
+docker compose build worker-image     # produces friday-worker:latest
+```
+
+The broker does not pull, so the image has to exist in the daemon's Docker
+before a Builder is spawned. The `worker-image` service exists only to build
+it — the containers it produces are started by the broker, one per assignment,
+never by compose.
+
+It adds **nothing** to `runtime`: `git`, `bash`, `ps` and `pgrep` are already
+there (`kill-descendants` resolves its pgid with `ps -o pgid=` and reaps with
+`pgrep -g`), and the Agent SDK's bundled `claude` binary ships in the tree
+with the musl variant already pruned. Deliberately **not** `FROM dev`, so no
+`gh`: under FRI-2078 a Builder reaches GitHub through a daemon-hosted MCP
+server, and a builder container has nothing to authenticate `gh` with.
+
+Run with no configuration it refuses rather than starting blind:
+
+```
+Error: worker has no IPC channel and no FRIDAY_DAEMON_URL + FRIDAY_WORKER_TOKEN to dial
+```
+
+The stage sits **above** `dev` in the Dockerfile on purpose. `dev` is the last
+stage and therefore Docker's default target; a stage appended after it would
+silently become the default, which is the failure that once rebuilt the
+Deployment as the dev image. `builder-image.test.ts` pins that ordering, the
+`FROM runtime` base, and the entrypoint path.
+
+**Still missing:** the repo in `/workspace` (FRI-2076). Spawning a Builder with
+container mode on logs `builder.workspace.container-not-provisioned` and gives
+it an empty workspace rather than failing, so the gap shows up in the log
+instead of being discovered mid-turn.
 
 ### Hostname and the reverse proxy
 

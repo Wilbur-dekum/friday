@@ -228,7 +228,10 @@ services:
     command: ["node", "/srv/broker.mjs"]
     environment:
       BROKER_TOKEN: ${BROKER_TOKEN:-dev-broker-token}
-      BROKER_BUILDER_IMAGE: friday-dev:latest
+      # FRI-2079: the worker image, not the dev image. `friday-dev`'s CMD is
+      # `bash`, so a builder container started from it ran a shell and never
+      # dialled the command channel. Built by the `worker-image` service below.
+      BROKER_BUILDER_IMAGE: friday-worker:latest
       BROKER_BUILDER_NETWORK: friday_default
       BROKER_PORT: 7612
     volumes:
@@ -240,6 +243,23 @@ services:
     # builder.
     expose:
       - "7612"
+
+  # FRI-2079: exists ONLY to build the per-task builder image, which the broker
+  # creates containers from by name. The broker does not pull, so the image has
+  # to be present in the daemon's Docker:
+  #
+  #   docker compose build worker-image
+  #
+  # Its own profile, and one no `up` command activates, because this service is
+  # never meant to RUN — `docker compose build <service>` builds it by name
+  # regardless of profile. The container it produces is started by the broker,
+  # one per Builder assignment, never by compose.
+  worker-image:
+    build:
+      context: .
+      target: worker
+    image: friday-worker:latest
+    profiles: ["builder-image"]
 
   # FRI-2071: the development container type. NOT part of `docker compose up` —
   # it sits behind a profile so it can never start alongside the Deployment.
