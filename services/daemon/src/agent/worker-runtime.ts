@@ -76,8 +76,13 @@ export interface WorkerHandle {
    * cancelled turn leaked, without taking down the agent — the worker has to
    * survive long enough to see the SDK iterator close and emit `turn-complete`
    * cleanly. Returns the count signalled, for the log line and the test.
+   *
+   * `null` means the runtime cannot count them. The container runtime asks the
+   * worker to do the killing (it is the one inside the pid namespace), so the
+   * number is not observable from here — and 0 would read in
+   * `worker.abort.descendants-killed` as "nothing was running".
    */
-  terminateDescendants(signal: "SIGTERM" | "SIGKILL"): Promise<number>;
+  terminateDescendants(signal: "SIGTERM" | "SIGKILL"): Promise<number | null>;
 }
 
 export interface WorkerRuntime {

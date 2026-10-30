@@ -275,6 +275,62 @@ is deliberately NOT accepted here: it sits on a volume any builder in the
 Deployment container can read, so across a network boundary it identifies
 nothing.
 
+### Containerised workers
+
+A worker normally runs as a detached child process reached over node IPC.
+Under FRI-2038 it can instead run as its own container — one per Builder
+assignment — which turns teardown into "stop the container" instead of a
+process-tree walk, and resource limits into cgroups instead of `ulimit`s macOS
+does not honour.
+
+Both are the same five capabilities behind one seam
+(`agent/worker-runtime.ts`): start it, talk to it, hear from it, ask if it is
+alive, stop it. Container mode is **opt-in by configuration, not by platform** —
+a laptop and a single-container Deployment both keep the process runtime:
+
+| Variable                      | Purpose                                                                      |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| `FRIDAY_BUILDER_BROKER_URL`   | where the broker listens, e.g. `http://builder-broker:7612`                  |
+| `FRIDAY_BUILDER_BROKER_TOKEN` | shared secret the daemon presents to it                                      |
+| `FRIDAY_DAEMON_URL`           | the daemon as the **container** sees it, e.g. `http://friday:7611`           |
+| `FRIDAY_WORKER_LISTEN`        | the worker-facing listener above — a worker with no way home cannot dial out |
+
+All four are required; three of them are useless alone. The broker runs under
+the `builders` compose profile (`docker compose --profile builders up`).
+
+**The broker is the privileged seam.** Creating containers needs the Docker
+socket, and mounting it into the Deployment container would be host-root
+equivalent on the container that also runs the unsandboxed orchestrator. So the
+socket lives in a dependency-free sidecar that does one thing, and the daemon
+does **not** hand it a container spec — it supplies a task id and four env
+values. The image, mounts, capabilities and limits are the broker's to decide
+(`services/builder-broker/broker.mjs`), which is what keeps the privilege
+proportionate.
+
+**The channel.** A container has no parent process, so commands and events ride
+one WebSocket the worker dials out to the worker-facing listener
+(`/api/worker/channel`), authorised at upgrade with the same per-worker token.
+One bidirectional connection rather than SSE-down/POST-up, because node IPC
+gives ordering structurally and there is no general sequence number on the wire
+to rebuild it from.
+
+**A dropped channel fails the turn.** No reconnection, no replay buffer, no
+resume cursor: mid-turn resumption would mean reconciling partially-written
+blocks against a worker whose own view may have moved on. It reaches the daemon
+as a worker exit, which is the path that already fails a turn cleanly.
+
+Two places the container boundary is lossy, stated rather than papered over:
+
+- **Urgency becomes a grace period.** There is no process group an outside
+  caller can signal, so `SIGKILL` arrives at the broker as `?grace=0` and
+  `SIGTERM` as its default stop timeout. The abort path's forced kill fires at
+  500 ms; a fixed 10 s container stop would have made that deadline meaningless.
+- **Descendant kills are not counted.** `abortTurn` reaps a cancelled turn's
+  tool subprocesses without taking down the agent. The daemon cannot `pgrep -g`
+  into another pid namespace, so it asks the worker to do it and
+  `worker.abort.descendants-killed` logs `null` — not `0`, which would read as
+  "nothing was running".
+
 ### Hostname and the reverse proxy
 
 The stack runs behind a Caddy reverse proxy on **<http://friday.localhost>**, not bare `localhost:7615`. That is deliberate: BetterAuth derives absolute URLs, the CSRF origin list and the session cookie's `Secure`/`__Secure-` prefix from its `baseURL`, and **hard-exits** when a configured public URL is not among `trustedOrigins`. Exercising a real hostname in dev is the only way to meet that before a Deployment does.
@@ -299,7 +355,7 @@ Three places it is read, in order: `process.env`, the vault, then `~/.friday/.en
 
 Two traps worth knowing:
 
-- **Only one env file is parsed.** `localEnvPath()` prefers `~/.friday/.env.local` and falls back to `~/.friday/.env` — it does not merge them. If a `.env.local` appears alongside a `.env`, the `.env` stops being read entirely and anything in it silently stops working.
+- **Both env files are read, `.env.local` winning on conflict.** It used to be either/or — `.env.local` when it existed, `.env` otherwise — which was invisible on a laptop and broke on migration, because `friday restore` _writes_ `.env.local` and thereby silently orphaned every key in `.env`. The symptom was not a config error: the Deployment booted healthy and every turn answered `Not logged in · Please run /login`.
 - **The musl build must stay out of the image.** pnpm installs both linux variants of the SDK's bundled binary; the SDK picks musl on a glibc image, and executing it fails with `ENOENT` for the missing loader — which the SDK reports as the misleading _"Claude Code native binary not found"_ even though the file is present. The Dockerfile prunes it in the builder stage, with an assertion so a silent re-add fails the build.
 
 ### Secrets

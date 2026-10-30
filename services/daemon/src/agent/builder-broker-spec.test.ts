@@ -19,17 +19,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * imported directly rather than exercised through HTTP.
  */
 
-async function loadSpecBuilder(env: Record<string, string> = {}) {
+async function loadBroker(env: Record<string, string> = {}) {
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
   // Fresh module per case: the broker reads its config at import time, which
   // is deliberate — a privileged process should not re-read policy at runtime.
   // A literal specifier, because a variable one defeats the bundler's
   // resolution (same trap as packages/shared's env-layering test).
   vi.resetModules();
-  const mod = (await import("../../../builder-broker/broker.mjs")) as {
+  return (await import("../../../builder-broker/broker.mjs")) as {
     buildContainerSpec: (taskId: string, env?: Record<string, string>) => Record<string, never>;
+    clampGrace: (raw: unknown) => number;
   };
-  return mod.buildContainerSpec;
+}
+
+async function loadSpecBuilder(env: Record<string, string> = {}) {
+  return (await loadBroker(env)).buildContainerSpec;
 }
 
 beforeEach(() => {
@@ -106,5 +110,27 @@ describe("builder container spec", () => {
     expect(
       (build("task-1", {}) as unknown as { Labels: Record<string, string> }).Labels,
     ).toMatchObject({ "friday.builder": "1", "friday.task": "task-1" });
+  });
+});
+
+describe("teardown grace period", () => {
+  /**
+   * FRI-2038. A container has no process group an outside caller can signal,
+   * so the daemon's SIGTERM/SIGKILL distinction reaches the broker as "the
+   * default stop timeout" versus "none". That mapping is load-bearing: the
+   * abort path's forced kill fires at 500ms, and a fixed 10s stop would have
+   * made the deadline meaningless for a containerised worker.
+   */
+  it("honours an urgent teardown and clamps a hostile one", async () => {
+    const { clampGrace } = await loadBroker();
+    expect(clampGrace("0")).toBe(0); // SIGKILL: no grace at all
+    expect(clampGrace("5")).toBe(5);
+    expect(clampGrace(null)).toBe(10); // SIGTERM: the broker's default
+    expect(clampGrace("")).toBe(10);
+    expect(clampGrace("nonsense")).toBe(10);
+    // Caller-supplied, so bounded rather than trusted — an unbounded value
+    // would let one request hold a privileged process for as long as it likes.
+    expect(clampGrace("99999")).toBe(30);
+    expect(clampGrace("-5")).toBe(0);
   });
 });

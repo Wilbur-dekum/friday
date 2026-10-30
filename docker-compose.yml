@@ -161,6 +161,23 @@ services:
       # Serves ONLY WORKER_FACING_ROUTES and requires a per-worker token —
       # the other 80-odd routes stay loopback-only by construction.
       FRIDAY_WORKER_LISTEN: 0.0.0.0:7611
+      # FRI-2038: container mode, off unless the broker is actually running.
+      #
+      # `${...:-}` is deliberate here, and the opposite of the choice made for
+      # ANTHROPIC_API_KEY below. There is no `.env` fallback to shadow, and all
+      # three values are required together — so an empty string is simply
+      # "unconfigured", which keeps the local process runtime. Setting these
+      # unconditionally would flip the daemon into container mode while the
+      # `builders` profile is down, and every worker spawn would fail at the
+      # broker.
+      #
+      #   docker compose --profile builders up
+      #   FRIDAY_BUILDER_BROKER_URL=http://builder-broker:7612 docker compose up friday
+      FRIDAY_BUILDER_BROKER_URL: ${FRIDAY_BUILDER_BROKER_URL:-}
+      FRIDAY_BUILDER_BROKER_TOKEN: ${BROKER_TOKEN:-dev-broker-token}
+      # The daemon as a BUILDER container sees it — the compose service name and
+      # the worker-facing port, not localhost.
+      FRIDAY_DAEMON_URL: http://friday:7611
       # FRI-2060: agent credentials. Headless by necessity — the CLI's
       # subscription OAuth needs an interactive login and a persisted
       # credential dir, which an unattended Deployment cannot do. An API key

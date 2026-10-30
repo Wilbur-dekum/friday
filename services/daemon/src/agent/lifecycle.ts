@@ -33,13 +33,9 @@ import { logger } from "../log.js";
 // FRI-2037: the kill primitives moved to the runtime, which owns HOW a worker
 // is stopped. Re-exported so existing callers and lifecycle-pgrp.test.ts are
 // untouched by the move.
-import {
-  killPgrp,
-  killPgrpDescendants,
-  localProcessRuntime as workerRuntime,
-  type WorkerHandle,
-} from "./worker-runtime.js";
+import { killPgrp, killPgrpDescendants, type WorkerHandle } from "./worker-runtime.js";
 export { killPgrp, killPgrpDescendants };
+import { resolveWorkerRuntime } from "./container-runtime.js";
 import { mintWorkerToken, revokeWorkerToken } from "./worker-tokens.js";
 import { captureFor } from "../posthog.js";
 import { type ArchiveReason } from "@friday/shared";
@@ -89,6 +85,12 @@ import type { WorkerEvent, WorkerPromptCommand, WorkerSpawnOptions } from "./wor
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, "worker.js");
+/**
+ * FRI-2038: local process or container, decided by configuration once at
+ * import. Per-spawn resolution would let a mid-flight config change hand two
+ * halves of the same agent's lifetime to different runtimes.
+ */
+const workerRuntime = resolveWorkerRuntime();
 
 /**
  * FRI-148 §5.C: per-turn threshold for `IllegalBlockTransitionError`
@@ -422,7 +424,8 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
 
   // FRI-2037: spawn through the runtime seam. HOW a worker is started —
   // detached process group, bash, sandbox-exec, ulimit — belongs to the local
-  // runtime; the daemon states WHAT it needs started.
+  // runtime; the daemon states WHAT it needs started. FRI-2038: which runtime
+  // that is comes from configuration, resolved once at import.
   const handle = workerRuntime.spawn({
     workerPath: WORKER_PATH,
     execArgv: process.execArgv,

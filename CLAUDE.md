@@ -65,6 +65,9 @@ services/daemon              — Headless API tier; owns Claude SDK + agent regi
   src/prompts/               — Dispatch-prompt assembly (FRI-123): buildSystemPrompt / buildDispatchPrompt + DispatchIntent union + memoryRecallHook; also the code-owned intake-persona (FRI-171)
   src/intake/                — Stateless capture intake router (FRI-171, ADR-047): classifier + routing-target registry + executors + Gate 1/2 dispatch
 services/dashboard           — SvelteKit + Svelte 5; auth-gated public surface
+services/builder-broker      — broker.mjs: the privileged seam that creates per-task
+                               builder containers (FRI-2038). Dependency-free on
+                               purpose; it is the only process holding the Docker socket
 packaging/                   — pack.mjs: builds the pre-baked release tarball (ADR-034)
 install.sh                   — Curl-installable installer; writes the launchd plist directly (ADR-034)
 .node-version                — Pinned Node (22.21.1); single Node-pin source of truth (fnm + CI)
