@@ -34,6 +34,13 @@ export interface FridayEnvConfig {
   readonly cloudflareTunnelToken: string | undefined;
   readonly posthogApiKey: string | undefined;
   readonly posthogHost: string | undefined;
+  /**
+   * FRI-2078: the credential the hosted GitHub tools use to open PRs and read
+   * CI. Absent means Builders cannot open PRs — deliberately, because the
+   * alternative was the ambient `gh` login the daemon's machine happened to
+   * have, which Friday could neither scope nor attribute.
+   */
+  readonly githubToken: string | undefined;
 }
 
 let cached: FridayEnvConfig | undefined;
@@ -165,6 +172,7 @@ export function loadFridayConfig(): FridayEnvConfig {
     cloudflareTunnelToken: readIntegration("CLOUDFLARE_TUNNEL_TOKEN", "cloudflareTunnelToken"),
     posthogApiKey: readIntegration("POSTHOG_API_KEY", "posthogApiKey"),
     posthogHost: readIntegration("POSTHOG_HOST", "posthogHost"),
+    githubToken: readIntegration("GITHUB_TOKEN", "githubToken"),
   });
   return cached;
 }
