@@ -183,6 +183,7 @@ import {
   WORKER_FACING_ROUTES,
 } from "./worker-listener.js";
 import { attachWorkerChannel } from "./worker-channel.js";
+import { handleWorkerGit } from "./worker-git.js";
 import { acceptChannel } from "../agent/container-runtime.js";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
@@ -422,6 +423,22 @@ export const ROUTES: RouteRow[] = [
   },
 
   // --- SSE events --- (streaming; owns res for the connection lifetime)
+  // --- The Builder's repository, served to its container (FRI-2076) ---
+  // Raw: git's smart HTTP is a binary pkt-line protocol, so the handler owns
+  // req/res. The repository is NOT in the URL — it is resolved from the
+  // per-worker token, so there is no parameter to traverse. Read-only;
+  // `git-receive-pack` is refused until FRI-2077 adds the ref gate with it.
+  {
+    method: "GET",
+    match: "/api/worker/git/info/refs",
+    raw: (ctx) => handleWorkerGit(ctx),
+  },
+  {
+    method: "POST",
+    match: "/api/worker/git/git-upload-pack",
+    raw: (ctx) => handleWorkerGit(ctx),
+  },
+
   {
     method: "GET",
     match: "/api/events",

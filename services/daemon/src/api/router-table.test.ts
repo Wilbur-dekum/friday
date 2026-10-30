@@ -42,6 +42,12 @@ const GOLDEN: string[] = [
   "GET /api/commands",
   "POST /api/commands/dispatch",
   "GET /api/events",
+  // FRI-2076: the Builder's repo, served to its container. The repository is
+  // NOT a path parameter — it is resolved from the per-worker token — so these
+  // are two fixed verbs, not a prefix match. `git-receive-pack` is absent on
+  // purpose: push is FRI-2077, where the ref gate lives.
+  "GET /api/worker/git/info/refs",
+  "POST /api/worker/git/git-upload-pack",
   "POST /api/elicitation/wait",
   "POST fn:predicate",
   "POST /api/internal/cancel-queued",
@@ -158,6 +164,10 @@ const GOLDEN_RAW: string[] = [
   "POST /api/evolve/scan",
   "POST /api/uploads",
   "GET re:^\\/api\\/uploads\\/[a-f0-9]{64}$",
+  // git's smart HTTP is binary pkt-line, streamed straight from
+  // git-http-backend's stdout — nothing about it survives a JSON envelope.
+  "GET /api/worker/git/info/refs",
+  "POST /api/worker/git/git-upload-pack",
 ];
 
 describe("ROUTES contract", () => {
@@ -175,7 +185,7 @@ describe("ROUTES contract", () => {
     const added = [...actual].filter((k) => !golden.has(k));
     expect({ dropped, added }).toEqual({ dropped: [], added: [] });
     expect(ROUTES.length).toBe(GOLDEN.length);
-    expect(ROUTES.length).toBe(84);
+    expect(ROUTES.length).toBe(86);
   });
 
   it("orders every specific route before the broad regex that would swallow it", () => {
@@ -209,7 +219,7 @@ describe("ROUTES contract", () => {
     expect(gated.size).toBe(22);
   });
 
-  it("marks EXACTLY the 6 streaming/binary/seam routes as raw (owns req/res)", () => {
+  it("marks EXACTLY the 8 streaming/binary/seam routes as raw (owns req/res)", () => {
     const raw = new Set(ROUTES.filter((r) => r.raw != null).map(rowKey));
     expect([...raw].sort()).toEqual([...GOLDEN_RAW].sort());
     // raw rows own the response: they carry no JSON handler/schema.

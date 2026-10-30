@@ -401,10 +401,43 @@ silently become the default, which is the failure that once rebuilt the
 Deployment as the dev image. `builder-image.test.ts` pins that ordering, the
 `FROM runtime` base, and the entrypoint path.
 
-**Still missing:** the repo in `/workspace` (FRI-2076). Spawning a Builder with
-container mode on logs `builder.workspace.container-not-provisioned` and gives
-it an empty workspace rather than failing, so the gap shows up in the log
-instead of being discovered mid-turn.
+**Landed (FRI-2076): the daemon serves the repo.** A containerised Builder
+clones from the daemon rather than from the real origin, over two routes on
+the worker-facing listener:
+
+| Route                                  | What                  |
+| -------------------------------------- | --------------------- |
+| `GET /api/worker/git/info/refs`        | the ref advertisement |
+| `POST /api/worker/git/git-upload-pack` | the fetch itself      |
+
+`git-http-backend` does the work, driven as CGI. **The repository is not in
+the URL** — it is resolved from the per-worker token (token → agent name →
+`meta_json.repo` → the same `resolveRepoGitDir` derivation create and teardown
+use), so `GIT_PROJECT_ROOT` and `PATH_INFO` are built server-side and there is
+no parameter to traverse. The worker chooses one of two verbs and nothing
+else.
+
+Three reasons this rather than cloning the real origin, in the order that
+decides it:
+
+1. **A local-path repo has no origin.** `worktree.repo` defaults to the
+   daemon's cwd, so this is the common case; a container cannot clone a path
+   on another host.
+2. **No repo credential enters the container** — the process running
+   untrusted repository code never holds one.
+3. **The allowlist becomes reachability.** FRI-2041's decision is enforced by
+   what is servable, and it is re-checked on every request, so narrowing the
+   allowlist reaches Builders already running.
+
+Read-only: `git-receive-pack` is refused, and so is
+`info/refs?service=git-receive-pack`, the push advertisement. Push arrives in
+FRI-2077 together with the `post-receive` ref gate that makes it safe — the
+transport is deliberately not enabled before the gate exists.
+
+**Still missing:** nothing else for a read-only Builder. Spawning one with
+container mode on still logs `builder.workspace.container-not-provisioned`
+until the clone is wired into the worker's startup, and pushing its work back
+is FRI-2077.
 
 ### Hostname and the reverse proxy
 
