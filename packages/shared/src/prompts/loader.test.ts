@@ -73,6 +73,44 @@ describe("composeSystemPrompt with identity", () => {
   });
 });
 
+describe("the Builder's GitHub surface is tools, not `gh` (FRI-2078)", () => {
+  /**
+   * The persona used to prescribe `gh pr create` and `gh pr checks --watch`,
+   * which ran on whatever `gh` login existed on the daemon's machine — a
+   * credential Friday could not scope, revoke or attribute, and which does
+   * not exist at all in a per-task container.
+   *
+   * Re-adding a `gh` instruction would silently restore that, with nothing
+   * failing. Hence this guard: the regression is invisible otherwise.
+   */
+  const composed = () =>
+    composeSystemPrompt(readPromptStack("builder", []), {
+      agentName: "builder-1",
+      agentType: "builder",
+      parentName: "friday",
+    });
+
+  it("tells a Builder to use the hosted tools", () => {
+    const text = composed();
+    expect(text).toContain("pr_create");
+    expect(text).toContain("pr_checks");
+  });
+
+  it("never tells a Builder to shell out to `gh`", () => {
+    // Narrow on purpose: the words "gh" and "GitHub" appear legitimately all
+    // over these prompts, so this matches an INSTRUCTION to run the binary.
+    expect(composed()).not.toMatch(/\bgh (pr|repo|auth|api|issue)\b/);
+  });
+
+  it("states the no-merge rule without naming a command to avoid", () => {
+    // "Do NOT run `gh pr merge`" named one route and implied others were
+    // fine. There is no merge tool now, so the rule is about the absence.
+    const text = composed();
+    expect(text).toMatch(/never merge/i);
+    expect(text).not.toMatch(/gh pr merge/);
+  });
+});
+
 describe("SOUL is identity-neutral; orchestrator owns 'You are Friday' (FRI-127)", () => {
   const ORCH_FRAMING = "You are Friday: the user's personal AI orchestrator";
 
