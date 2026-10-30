@@ -337,12 +337,18 @@ _Builder_ additionally needs its worktree, and `createWorkspace` still runs in
 the daemon process against the daemon's own `workspaces/` root, which a
 builder container's `/workspace` volume is not. Mounting the daemon's data dir
 into the container is the wrong fix: it hands the process running untrusted
-repository code a path straight past the boundary FRI-2062 drew. So the
-worktree has to be created _inside_ the container, which needs credentials
-reaching the repo from there — the half of FRI-2041 that is waiting on a
-GitHub App (FRI-2056). There is also no image whose entrypoint is the worker
-yet; `BROKER_BUILDER_IMAGE` currently names the dev image, whose `CMD` is
-`bash`.
+repository code a path straight past the boundary FRI-2062 drew.
+
+So the worktree is created _inside_ the container, from a repo the **daemon
+serves** over the worker-facing listener rather than one the container clones
+from the real origin — the only option that works for a local-path repo, and
+the one that keeps any repo credential out of the container entirely.
+`gh pr create` and `gh pr checks` are GitHub API calls a git route cannot
+serve, so those move daemon-side as an MCP server instead of a token in the
+container. FRI-2076–2080 carry the work, sequenced as 2080 → 2076 → 2077 with
+2078 and 2079 independent. There is also no image whose entrypoint is the
+worker yet; `BROKER_BUILDER_IMAGE` currently names the dev image, whose `CMD`
+is `bash`.
 
 ### Hostname and the reverse proxy
 
