@@ -136,6 +136,46 @@ EXPOSE 7615
 
 ENTRYPOINT ["node", "packages/cli/dist/bin/supervisor.js"]
 
+# ---- worker -----------------------------------------------------------------
+# The image a per-task builder container runs (FRI-2079, FRI-2038).
+#
+# PLACED BEFORE `dev` ON PURPOSE. `dev` is the last stage and therefore
+# Docker's default target, and a stage added after it would silently become
+# the default instead — the exact failure the banner below describes. Keeping
+# this one above `dev` leaves that fact true.
+#
+# Adds NOTHING to `runtime`. Everything a worker needs is already there, which
+# is worth stating because the obvious move is `FROM dev`:
+#
+#   git, bash  — the agent's own tools shell out constantly
+#   ps, pgrep  — `kill-descendants` resolves its pgid with `ps -o pgid=` and
+#                reaps with `pgrep -g`; procps is not in node:*-slim
+#   claude     — the Agent SDK's bundled CLI, glibc variant, musl already
+#                pruned in the builder stage
+#
+# Deliberately NOT `FROM dev`, i.e. deliberately no `gh`. Under FRI-2078 a
+# Builder opens PRs and reads CI through a daemon-hosted MCP server, with the
+# GitHub token on the daemon side — so a builder container has nothing to
+# authenticate `gh` with, and shipping it would only invite someone to put a
+# credential where FRI-2038 exists to keep credentials out of.
+#
+# The entrypoint is the worker itself rather than the supervisor: this
+# container IS one worker. It dials the daemon's worker-facing listener on
+# start (FRIDAY_DAEMON_URL + FRIDAY_WORKER_TOKEN, both set by the broker) and
+# exits when that channel drops — see services/daemon/src/agent/worker-transport.ts.
+FROM runtime AS worker
+
+# `/workspace` is the per-task volume the broker mounts, and the worktree the
+# Builder works in. Created and owned here so the mount has the right owner
+# before anything writes to it; CONTAINER_WORKSPACE_PATH in workspace.ts is
+# the daemon-side spelling of this same path.
+USER root
+RUN mkdir -p /workspace && chown node:node /workspace
+USER node
+WORKDIR /app
+
+ENTRYPOINT ["node", "services/daemon/dist/agent/worker.js"]
+
 # ---- dev --------------------------------------------------------------------
 # !! THIS IS THE LAST STAGE, SO IT IS DOCKER'S DEFAULT TARGET. !!
 # Any build of this Dockerfile that does not name a target gets THIS image,
