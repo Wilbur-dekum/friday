@@ -1052,19 +1052,42 @@ running untrusted repository code. For a local-path repo nothing changes at all
 — a Builder's push already rides the daemon machine's git config today, because
 its worktree shares the daemon's origin.
 
-A `post-receive` hook in the daemon's `gitDir` is the forwarder, and it is also
-the gate: **only refs matching the Builder's own `friday/<agent>` branch may be
-forwarded.** That is a code gate — testable, logged, attributable to a User per
+**A `post-receive` hook cannot reject a push — measured.** Its stderr reaches
+the client as `remote:` text, but the push still reports `* [new branch]` and
+the ref lands; only `update` / `pre-receive` can refuse (verified: `!
+[remote rejected] (hook declined)`). So the two halves split: the GATE goes in
+`update`, which is the only place rejection exists, and the FORWARD goes in
+`post-receive`, which is the only place the objects are permanent — in
+`pre-receive` they are still quarantined.
+
+The gate is: **only refs matching the Builder's own `friday/<agent>` branch may
+be forwarded.** That is a code gate — testable, logged, attributable to a User per
 ADR-051/ADR-053 — replacing a prompt rule that currently asks a Builder not to
 push to `main`. Note this hook is daemon-side code we own and is unrelated to
 FRI-2042's deny-list, which is about hooks inside the _container's_ clone.
 
-**The hazard to design around, because it loses work silently:** `ensureMirror`
+\*\*`http.receivepack=true` is required or `git-http-backend` answers 403 — but it
+does NOT need writing into the user's repo: `GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=http.receivepack GIT_CONFIG_VALUE_0=true` injects it
+per-request, verified, leaving the repo's own config untouched.
+
+The hazard to design around, because it loses work silently:** `ensureMirror`
 refreshes with `git remote update --prune`, and a `--mirror` clone's refspec is
 `+refs/*:refs/*`. A Builder branch sitting in the mirror but not yet forwarded
 to GitHub **is pruned** by the next `createWorkspace` against that mirror.
-Forward before any prune can run, or keep incoming pushes in a separate ref
-namespace the mirror refspec does not cover. Do not leave the ordering implicit.
+**The obvious escape does not work — measured.\*_ A `--mirror` clone's refspec
+is `+refs/_:refs/_`, which covers every namespace: refs placed in
+`refs/friday-pending/_`were pruned exactly like ones in`refs/heads/\*`.
+Nothing under `refs/` survives.
+
+Which exposes the real question. A mirror is BY DEFINITION a copy of
+upstream, so any state that exists only locally is transient by construction,
+and once the ref goes the objects are unreachable and gc-able. Holding a
+Builder's un-pushed work there is wrong regardless of ordering. The options
+are therefore: forward synchronously so nothing local has to survive; narrow
+the mirror's refspec so it stops being a mirror; or land incoming pushes in a
+per-assignment staging repo the daemon never prunes — the same per-task shape
+FRI-2038 already uses for volumes. Decide this before writing code.
 
 ### FRI-2078 — Host PR creation and CI checks daemon-side
 
@@ -1277,6 +1300,20 @@ misreport that epic's completeness.
 by it. A ticket that is merely LOW PRIORITY but does block an epic task stays
 with that epic — priority and blocking are different axes, and only blocking
 decides placement.
+
+### FRI-2081 — Playwright round-trip fails; the job is parked
+
+`bug` · parent FRI-2068
+
+`live-typing.spec.ts` fails the user-visible round-trip: a sent message lands
+0 rows in `blocks` where it expects 1. Parked in CI on 2026-10-30
+(`if: ${{ false && … }}` on the `playwright` job) rather than fixed, because
+CI had not run at all since 2026-10-15 and nobody has diagnosed it — a
+permanently-red required check trains people to ignore the board.
+
+Not yet established whether this is a real regression or an artefact of the
+two-week gap. The sync-harness `e2e` job is unaffected and still gating.
+Re-enable by deleting `false && `.
 
 ### FRI-2054 — Prune the container image (currently 1149 MB)
 
