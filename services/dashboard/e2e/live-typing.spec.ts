@@ -191,6 +191,30 @@ test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
     // optimistic in-memory write. Generous deadline because zero-
     // cache's mutator dispatch goes through CVR + bundles writes;
     // a fresh client group can take a few seconds on first send.
+    // FRI-2081: wait for the mutation to be PUSHED before polling Postgres.
+    //
+    // The bubble above proves only the OPTIMISTIC local write. Zero holds the
+    // mutation client-side until it has a live connection, and nothing before
+    // this point waits for one: `toBeEnabled()` is DOM hydration, not sync
+    // readiness. The CI failure this fixes had the bubble rendered, zero rows
+    // in `blocks`, and exactly one recorded call — `/api/sync/refresh` — so
+    // the push had never happened at all.
+    //
+    // Polling PG first turned that into "expected 1, received 0", which reads
+    // like a broken write path and is not. Waiting here does two things: it
+    // gives a slow first client group time to connect and flush (the real
+    // race), and when the push genuinely never happens it fails with that
+    // fact instead of blaming Postgres.
+    const pushDeadline = Date.now() + 20_000;
+    while (Date.now() < pushDeadline) {
+      if (mutatorCalls.some((c) => c.url.includes("/api/mutators"))) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    expect(
+      mutatorCalls.filter((c) => c.url.includes("/api/mutators")),
+      `client never pushed the mutation — Zero likely never connected. Calls seen: ${JSON.stringify(mutatorCalls)}`,
+    ).not.toHaveLength(0);
+
     let rows: Awaited<ReturnType<typeof readBlocksForUser>> = [];
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {

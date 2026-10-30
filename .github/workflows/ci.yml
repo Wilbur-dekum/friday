@@ -252,20 +252,17 @@ jobs:
     # gate failure can never let untested code merge via a "skipped" → required-
     # check-satisfied path. Only an explicit `code == 'false'` (every changed
     # file is *.md) skips it.
-    # PARKED (2026-10-30). `live-typing.spec.ts` fails the user-visible
-    # round-trip: a sent message lands 0 rows in `blocks` where it expects 1.
-    # Parked rather than fixed because CI had not run at all since
-    # 2026-10-15, so this is the first signal in two weeks and nobody has
-    # diagnosed it yet — and a permanently-red required check trains people
-    # to ignore the board, which is worse than an honestly-disabled one.
+    # Run UNLESS the gate explicitly classified the diff as docs-only. The
+    # `always() && != 'false'` form is fail-safe: if the gate job errors (its
+    # output is then empty, not 'false') the job still runs, so a transient
+    # gate failure can never let untested code merge via a "skipped" →
+    # required-check-satisfied path. Only an explicit `code == 'false'`
+    # (every changed file is *.md) skips it.
     #
-    # NOT a blanket "turn off e2e": the sync-harness `e2e` job above still
-    # runs and still gates. That one is passing, and it is the job that
-    # caught a real regression (a pre-FRI-2037 worker double) during the two
-    # weeks CI was dark.
-    #
-    # Re-enable by deleting `false && `. Tracked as FRI-2081.
-    if: ${{ false && always() && needs.files-changed.outputs.code != 'false' }}
+    # Unparked 2026-10-30 (FRI-2081): the failure was the test asserting on
+    # Postgres before the client had pushed its mutation, not a broken write
+    # path. `live-typing.spec.ts` now waits for the push.
+    if: ${{ always() && needs.files-changed.outputs.code != 'false' }}
 
     steps:
       - uses: actions/checkout@v6

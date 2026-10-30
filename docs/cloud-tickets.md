@@ -1313,9 +1313,22 @@ decides placement.
 CI had not run at all since 2026-10-15 and nobody has diagnosed it — a
 permanently-red required check trains people to ignore the board.
 
-Not yet established whether this is a real regression or an artefact of the
-two-week gap. The sync-harness `e2e` job is unaffected and still gating.
-Re-enable by deleting `false && `.
+**DIAGNOSED (2026-10-30), and it is not the write path.** The test's own
+diagnostics had the answer: the bubble rendered, and the only recorded network
+call was `/api/sync/refresh` — no `/api/mutators` call at all. So the
+OPTIMISTIC local write happened and the mutation was never pushed. Zero holds
+a mutation client-side until it has a live connection, and nothing in the test
+waited for one: `toBeEnabled()` is DOM hydration, not sync readiness. The
+test's own comment names the hazard two lines further down ("a fresh client
+group can take a few seconds on first send").
+
+Asserting against Postgres first turned that into "expected 1, received 0",
+which reads like a broken canonical write and is not — which is why this
+looked alarming enough to park a required check over.
+
+Fixed by waiting for the `/api/mutators` push before polling Postgres: it
+gives a slow first client group time to connect and flush, and when the push
+genuinely never happens it fails naming that fact. Job unparked.
 
 ### FRI-2054 — Prune the container image (currently 1149 MB)
 
