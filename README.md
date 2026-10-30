@@ -302,8 +302,10 @@ agent-friday/
 ├── services/
 │   ├── daemon/             @friday/daemon — owns Claude SDK, agent registry,
 │   │                       MCP servers, EventBus, SSE, scheduler, watchdog
-│   └── dashboard/          @friday/dashboard — SvelteKit + Svelte 5 (runes),
-│                           BetterAuth, adapter-node, PWA
+│   ├── dashboard/          @friday/dashboard — SvelteKit + Svelte 5 (runes),
+│   │                       BetterAuth, adapter-node, PWA
+│   └── builder-broker/     Privileged sidecar that creates per-task builder
+│                           containers — dependency-free, holds the Docker socket
 ├── bin/                    friday + friday-supervisor shims — exec through fnm (ADR-034)
 ├── packaging/              pack.mjs — builds the pre-baked release tarball (ADR-034)
 ├── install.sh              Curl-installable installer (ADR-034)

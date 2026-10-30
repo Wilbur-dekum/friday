@@ -49,6 +49,9 @@ const BUILDER_NETWORK = process.env.BROKER_BUILDER_NETWORK ?? "";
 const MEM_LIMIT_BYTES = Number(process.env.BROKER_MEM_LIMIT_BYTES ?? 2 * 1024 * 1024 * 1024);
 const NANO_CPUS = Number(process.env.BROKER_NANO_CPUS ?? 2_000_000_000); // 2 CPUs
 const PIDS_LIMIT = Number(process.env.BROKER_PIDS_LIMIT ?? 512);
+/** Seconds Docker waits after SIGTERM before SIGKILL, when the caller says nothing. */
+const DEFAULT_STOP_GRACE = 10;
+const MAX_STOP_GRACE = 30;
 
 /**
  * Env keys the daemon may set on a builder.
@@ -206,19 +209,38 @@ async function inspectBuilder(res, taskId) {
   });
 }
 
-async function deleteBuilder(res, taskId) {
+/**
+ * Stop and remove a builder.
+ *
+ * `grace` is how the caller expresses urgency, and it is the only expression
+ * available: a container has no process group an outside caller can signal, so
+ * the daemon's SIGTERM/SIGKILL distinction arrives here as "give it the
+ * default stop timeout" versus "none". The abort path's forced kill fires at
+ * 500ms, and a fixed 10s stop would have made that deadline meaningless for a
+ * containerised worker.
+ */
+async function deleteBuilder(res, taskId, graceParam) {
   const id = owned.get(taskId);
   // Idempotent: a teardown that races an exit must not 500.
   if (!id) return ok(res, { taskId, removed: false });
+  const grace = clampGrace(graceParam);
   try {
-    await docker("POST", `/containers/${id}/stop?t=10`);
+    await docker("POST", `/containers/${id}/stop?t=${grace}`);
   } catch {
     // Already stopped is fine; the remove below is what matters.
   }
   await docker("DELETE", `/containers/${id}?v=1&force=1`);
   owned.delete(taskId);
-  log("builder.removed", { taskId, containerId: id.slice(0, 12) });
+  log("builder.removed", { taskId, containerId: id.slice(0, 12), grace });
   return ok(res, { taskId, removed: true });
+}
+
+/** Caller-supplied, so bounded here rather than trusted. */
+export function clampGrace(raw) {
+  if (raw === null || raw === undefined || raw === "") return DEFAULT_STOP_GRACE;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_STOP_GRACE;
+  return Math.min(Math.max(Math.trunc(n), 0), MAX_STOP_GRACE);
 }
 
 function log(event, fields) {
@@ -251,7 +273,8 @@ export function startBroker() {
           return await createBuilder(req, res, await readBody(req));
         }
         if (req.method === "GET" && m) return await inspectBuilder(res, m[1]);
-        if (req.method === "DELETE" && m) return await deleteBuilder(res, m[1]);
+        if (req.method === "DELETE" && m)
+          return await deleteBuilder(res, m[1], url.searchParams.get("grace"));
         return fail(res, 404, "not found");
       } catch (err) {
         log("broker.error", { message: err instanceof Error ? err.message : String(err) });

@@ -174,6 +174,8 @@ import {
   workerFromRequest,
   WORKER_FACING_ROUTES,
 } from "./worker-listener.js";
+import { attachWorkerChannel } from "./worker-channel.js";
+import { acceptChannel } from "../agent/container-runtime.js";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -202,6 +204,12 @@ export function startServer(opts: StartServerOptions) {
     const workerServer = createServer((req, res) => {
       void handleWorkerFacing(req, res, cfg);
     });
+    // FRI-2038: the worker command channel. On this listener only — it is a
+    // worker-to-daemon channel, and the loopback listener has node IPC for
+    // the workers it owns. Authorised at upgrade with the same per-worker
+    // token the routes above require; an unexpected channel is closed by
+    // `acceptChannel` rather than left open.
+    attachWorkerChannel(workerServer, acceptChannel);
     workerServer.listen(workerListen.port, workerListen.host);
     logger.log("warn", "api.worker-listening", {
       host: workerListen.host,
