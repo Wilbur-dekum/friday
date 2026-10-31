@@ -30,6 +30,7 @@ async function loadBroker(env: Record<string, string> = {}) {
     buildContainerSpec: (taskId: string, env?: Record<string, string>) => Record<string, never>;
     clampGrace: (raw: unknown) => number;
     egressNoProxy: (proxyUrl: string) => string;
+    egressProxyUrl: (base: string, token?: string) => string;
   };
 }
 
@@ -212,6 +213,23 @@ describe("egress (FRI-2039)", () => {
     const env = envOf(build("task-1", {}));
     expect(env.NO_PROXY.split(",")).toContain("friday");
     expect(env.no_proxy.split(",")).toContain("friday");
+  });
+
+  it("puts the worker's own token in the proxy URL, so ordinary tools authenticate", async () => {
+    // `npm` and `git` will not set `Proxy-Authorization` by hand, but every
+    // client that honours HTTPS_PROXY turns userinfo into a Basic credential.
+    const build = await loadSpecBuilder({ BROKER_EGRESS_PROXY: "http://friday:7611" });
+    const env = envOf(build("task-1", { FRIDAY_WORKER_TOKEN: "tok-123" }));
+    expect(env.HTTPS_PROXY).toBe("http://x-friday:tok-123@friday:7611/");
+    expect(env.http_proxy).toBe("http://x-friday:tok-123@friday:7611/");
+  });
+
+  it("offers the bare proxy URL when there is no token to put in it", async () => {
+    // A builder with no token cannot authenticate anyway, and an empty
+    // password looks configured when it is not.
+    const { egressProxyUrl } = await loadBroker({});
+    expect(egressProxyUrl("http://friday:7611", undefined)).toBe("http://friday:7611");
+    expect(egressProxyUrl("not-a-url", "tok")).toBe("not-a-url");
   });
 
   it("derives NO_PROXY from the proxy URL rather than a second setting", async () => {

@@ -66,10 +66,27 @@ export const DEFAULT_EGRESS_PORT = 443;
  * `:22` as well.
  */
 export function resolveEgressPort(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.FRIDAY_EGRESS_PORT?.trim();
-  if (!raw) return DEFAULT_EGRESS_PORT;
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : DEFAULT_EGRESS_PORT;
+  return portFrom(env.FRIDAY_EGRESS_PORT, DEFAULT_EGRESS_PORT);
+}
+
+/** Plain HTTP's port. Separate from the CONNECT port; see `resolveEgressPort`. */
+export const DEFAULT_HTTP_EGRESS_PORT = 80;
+
+/**
+ * The one port plain-HTTP egress will forward to.
+ *
+ * Overridable for the same reason as the CONNECT port: 80 needs root to bind,
+ * so the success path would otherwise be untestable. The default is pinned.
+ */
+export function resolveHttpEgressPort(env: NodeJS.ProcessEnv = process.env): number {
+  return portFrom(env.FRIDAY_EGRESS_HTTP_PORT, DEFAULT_HTTP_EGRESS_PORT);
+}
+
+function portFrom(raw: string | undefined, fallback: number): number {
+  const t = raw?.trim();
+  if (!t) return fallback;
+  const n = Number(t);
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : fallback;
 }
 
 /**

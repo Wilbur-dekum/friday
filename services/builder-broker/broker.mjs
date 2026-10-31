@@ -162,6 +162,25 @@ function safeJson(s) {
  * proxy it goes out through. Two settings that must agree is a way for them to
  * disagree.
  */
+/**
+ * The proxy URL a builder is given, with its own token as userinfo.
+ *
+ * Returns the bare URL when there is no token: a builder with no token cannot
+ * authenticate to the proxy anyway, and a URL with an empty password is worse
+ * than one with none — it looks configured.
+ */
+export function egressProxyUrl(base, token) {
+  if (!token) return base;
+  try {
+    const u = new URL(base);
+    u.username = "x-friday";
+    u.password = String(token);
+    return u.toString();
+  } catch {
+    return base;
+  }
+}
+
 export function egressNoProxy(proxyUrl) {
   try {
     const host = new URL(proxyUrl).hostname;
@@ -184,6 +203,13 @@ export function buildContainerSpec(taskId, callerEnv) {
     .filter(([k]) => ALLOWED_ENV.has(k))
     .map(([k, v]) => `${k}=${String(v)}`);
   if (EGRESS_PROXY) {
+    // Credentials IN the proxy URL, so ordinary tools authenticate without
+    // knowing anything about Friday: every HTTP client that honours
+    // `HTTPS_PROXY` turns userinfo into `Proxy-Authorization: Basic`. Without
+    // this a builder would have to set that header by hand, which `npm` and
+    // `git` will not do. The token is the worker's own, already in this
+    // container's environment as `FRIDAY_WORKER_TOKEN`.
+    const proxyUrl = egressProxyUrl(EGRESS_PROXY, (callerEnv ?? {}).FRIDAY_WORKER_TOKEN);
     // Both spellings: tools disagree on case, and a tool that reads neither
     // simply fails closed on an internal network, which is the right default.
     //
@@ -193,10 +219,10 @@ export function buildContainerSpec(taskId, callerEnv) {
     // allowlist, and not port 443).
     const noProxy = egressNoProxy(EGRESS_PROXY);
     env.push(
-      `HTTPS_PROXY=${EGRESS_PROXY}`,
-      `https_proxy=${EGRESS_PROXY}`,
-      `HTTP_PROXY=${EGRESS_PROXY}`,
-      `http_proxy=${EGRESS_PROXY}`,
+      `HTTPS_PROXY=${proxyUrl}`,
+      `https_proxy=${proxyUrl}`,
+      `HTTP_PROXY=${proxyUrl}`,
+      `http_proxy=${proxyUrl}`,
       `NO_PROXY=${noProxy}`,
       `no_proxy=${noProxy}`,
     );
