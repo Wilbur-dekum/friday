@@ -1,7 +1,15 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -336,6 +344,99 @@ describe("a Builder pushes its branch back (FRI-2077)", () => {
       branch: "friday/builder-2",
     });
     expect(a).not.toBe(b);
+  });
+});
+
+describe("the ref gate (FRI-2077, slice 2)", () => {
+  /** Clone, commit, and attempt a push of `ref`. Resolves/rejects as git does. */
+  async function pushRef(token: string, name: string, ref: string): Promise<string> {
+    const dest = join(scratch, `gate-${name}-${ref.replace(/\W/g, "_")}`);
+    await cloneAs(token, dest);
+    const g = (...a: string[]) => execFileSync("git", a, { cwd: dest, stdio: "pipe" });
+    g("config", "user.email", "t@t.test");
+    g("config", "user.name", "t");
+    writeFileSync(join(dest, "new.txt"), "x\n");
+    g("add", ".");
+    g("commit", "-qm", "work");
+    const { stderr } = await run(
+      "git",
+      ["-c", `http.extraHeader=Authorization: Bearer ${token}`, "push", "origin", `HEAD:${ref}`],
+      { cwd: dest, timeout: 30_000 },
+    );
+    return stderr;
+  }
+
+  it("refuses a push to main — the code gate, not a prompt rule", async () => {
+    // The Builder persona used to be ASKED not to push to main. This is the
+    // same rule as code: rejection, not persuasion.
+    const token = await builderWithRepo("builder-1", repo);
+    workspaceMod.ensureStagingRepo({ name: "builder-1", repo, branch: "friday/builder-1" });
+    await expect(pushRef(token, "builder-1", "refs/heads/main")).rejects.toThrow(
+      /hook declined|refusing refs\/heads\/main/,
+    );
+  });
+
+  it("accepts a push to the Builder's own branch", async () => {
+    // The control: the gate must refuse for the right reason, not refuse
+    // everything the moment a hook exists.
+    const token = await builderWithRepo("builder-1", repo);
+    const staging = workspaceMod.ensureStagingRepo({
+      name: "builder-1",
+      repo,
+      branch: "friday/builder-1",
+    });
+    await expect(pushRef(token, "builder-1", "refs/heads/friday/builder-1")).resolves.toBeDefined();
+    expect(
+      execFileSync("git", ["--git-dir", staging, "rev-parse", "refs/heads/friday/builder-1"], {
+        encoding: "utf8",
+      }).trim(),
+    ).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("refuses another Builder's branch, not just main", async () => {
+    // Ref-scoped, so a Builder cannot land work under a sibling's name either.
+    const token = await builderWithRepo("builder-1", repo);
+    workspaceMod.ensureStagingRepo({ name: "builder-1", repo, branch: "friday/builder-1" });
+    await expect(pushRef(token, "builder-1", "refs/heads/friday/builder-2")).rejects.toThrow(
+      /hook declined|refusing/,
+    );
+  });
+
+  it("makes the hook executable — git ignores a non-executable hook SILENTLY", async () => {
+    // The chmod is the whole gate. Without it the push is simply accepted,
+    // with no error anywhere, so this is pinned directly.
+    const staging = workspaceMod.ensureStagingRepo({
+      name: "builder-1",
+      repo,
+      branch: "friday/builder-1",
+    });
+    const mode = statSync(join(staging, "hooks", "update")).mode & 0o777;
+    expect(mode & 0o111).not.toBe(0);
+  });
+
+  it("rewrites the gate on re-spawn, so an old branch cannot be inherited", () => {
+    // `ensureStagingRepo` is idempotent; the gate must not be.
+    const staging = workspaceMod.ensureStagingRepo({
+      name: "builder-1",
+      repo,
+      branch: "friday/builder-1",
+    });
+    workspaceMod.ensureStagingRepo({ name: "builder-1", repo, branch: "friday/renamed" });
+    const hook = readFileSync(join(staging, "hooks", "update"), "utf8");
+    expect(hook).toContain("refs/heads/friday/renamed");
+    expect(hook).not.toContain("refs/heads/friday/builder-1");
+  });
+
+  it("refuses to bake a branch name it cannot safely quote", () => {
+    // The branch reaches here from `body.worktree.branch` and lands inside
+    // single quotes in a generated shell script.
+    expect(() =>
+      workspaceMod.ensureStagingRepo({
+        name: "builder-1",
+        repo,
+        branch: "friday/x'; rm -rf /; echo '",
+      }),
+    ).toThrow(/unsafe branch name/);
   });
 });
 

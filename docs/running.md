@@ -462,16 +462,36 @@ mid-flight stops the write, not just the read.
 
 Allowing `git-receive-pack` does not reintroduce the window FRI-2076 refused
 it over. A Builder can write arbitrary refs into its **own** staging repo,
-which nothing prunes, nothing else reads, and — until slice 3's `post-receive`
-— nothing forwards. The ref gate still belongs in `update`, the only hook
-where rejection exists (slice 2); it is simply not what makes the transport
-safe to serve.
+which nothing prunes and nothing else reads — so the transport is safe to
+serve independently of the gate below.
+
+**Landed (FRI-2077, slice 2): the ref gate, as code.** The staging repo gets a
+generated `update` hook allowing exactly one ref — the Builder's own
+`refs/heads/<branch>`. Everything else is refused with
+`! [remote rejected] (hook declined)`.
+
+`update` is the only hook where rejection exists. Measured: a `post-receive`
+hook's stderr reaches the client as `remote:` text, but the push still reports
+`* [new branch]` and the ref lands anyway. So the gate goes in `update` and the
+forward (slice 3) in `post-receive`, which is the only place the objects are
+permanent — in `pre-receive` they are still quarantined.
+
+This replaces a prompt rule that merely **asked** a Builder not to push to
+`main` with something testable, logged and attributable to a User per
+ADR-051/ADR-053. An LLM declining to push to `main` is not a control.
+
+Two details that carry the whole gate. The allowed ref is **baked in** at spawn
+rather than read from `REMOTE_USER`: that variable is set from the request, and
+a gate that trusts its caller is not a gate. And the hook is **chmod 0755** —
+git ignores a non-executable hook _silently_, so the push would simply be
+accepted with no error anywhere. Both are pinned by tests that fail when either
+is removed. Unrelated to FRI-2042's deny-list, which is about hooks inside the
+container's clone; this one is daemon-side code Friday authors.
 
 **Still missing:** the clone. Spawning a Builder with container mode on still
 logs `builder.workspace.container-not-provisioned` — the repo is servable and
 now writable, but nothing runs `git clone` into `/workspace`, so the volume
-stays empty. Slices 2 and 3 of FRI-2077 add the `update` ref gate and the
-`post-receive` forward to GitHub.
+stays empty. Slice 3 of FRI-2077 adds the `post-receive` forward to GitHub.
 
 ### Hostname and the reverse proxy
 
