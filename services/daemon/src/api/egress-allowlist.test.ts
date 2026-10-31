@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  ALLOWED_EGRESS_PORT,
+  DEFAULT_EGRESS_PORT,
   DEFAULT_EGRESS_ALLOWLIST,
   checkDestination,
   hostAllowed,
@@ -165,7 +165,7 @@ describe("the CONNECT target", () => {
       expect(v.ok, String(p)).toBe(false);
       if (!v.ok) expect(v.reason).toMatch(/only port 443/);
     }
-    expect(ALLOWED_EGRESS_PORT).toBe(443);
+    expect(DEFAULT_EGRESS_PORT).toBe(443);
   });
 
   it("refuses an IP literal before it ever reaches a resolver", () => {
