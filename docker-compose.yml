@@ -207,6 +207,13 @@ services:
       # SDK session transcripts live outside FRIDAY_DATA_DIR; without a volume
       # every Conversation silently starts fresh on each deploy (FRI-2007).
       - friday-home:/home/friday
+    # FRI-2039: both networks. The default one for Postgres and zero-cache;
+    # the internal `builders` one so containers with no route off it can
+    # still reach the worker-facing listener (FRI-2072) and the CONNECT
+    # proxy that is their single allowlisted way out.
+    networks:
+      - default
+      - builders
 
   # FRI-2038: the builder broker — the ONLY component holding the Docker
   # socket. Behind a profile, so it never starts unless asked for.
@@ -232,7 +239,14 @@ services:
       # `bash`, so a builder container started from it ran a shell and never
       # dialled the command channel. Built by the `worker-image` service below.
       BROKER_BUILDER_IMAGE: friday-worker:latest
-      BROKER_BUILDER_NETWORK: friday_default
+      # FRI-2039: the internal network, NOT friday_default. On the default
+      # network a builder had full internet access and could reach Postgres
+      # and zero-cache directly.
+      BROKER_BUILDER_NETWORK: ${COMPOSE_PROJECT_NAME:-friday}_builders
+      # The allowlisted hole: the daemon's CONNECT proxy on its worker-facing
+      # listener. The broker injects this into the builder as HTTPS_PROXY; the
+      # daemon decides which destinations it will actually open.
+      BROKER_EGRESS_PROXY: http://friday:7611
       BROKER_PORT: 7612
     volumes:
       - ./services/builder-broker/broker.mjs:/srv/broker.mjs:ro
@@ -315,6 +329,23 @@ services:
       - friday-data:/data
       - friday-home:/home/friday
     working_dir: /workspace
+
+networks:
+  # The default compose network: Postgres, zero-cache, the dashboard, the
+  # broker. A builder is NOT on it.
+  default:
+  # FRI-2039: where builders live. `internal: true` means Docker attaches no
+  # gateway, so there is no route off this network at all — egress
+  # deny-by-default is a property of the topology rather than a rule, and
+  # `169.254.169.254` is unreachable because no path to it exists.
+  #
+  # The daemon joins BOTH, which is what lets it serve the one allowlisted hole
+  # (its CONNECT proxy, FRI-2039) and the worker-facing routes (FRI-2072). It
+  # is also what keeps Postgres away from builders: a builder on this network
+  # alone cannot address `postgres` at all, which is most of FRI-2040 falling
+  # out of the same decision.
+  builders:
+    internal: true
 
 volumes:
   pgdata:

@@ -44,8 +44,25 @@ const LISTEN_HOST = process.env.BROKER_HOST ?? "0.0.0.0";
 const BUILDER_IMAGE = process.env.BROKER_BUILDER_IMAGE ?? "";
 /** Shared secret the daemon presents. Required — the broker is privileged. */
 const BROKER_TOKEN = process.env.BROKER_TOKEN ?? "";
-/** Network the builder joins, so it can reach the worker-facing listener. */
+/**
+ * Network the builder joins, so it can reach the worker-facing listener.
+ *
+ * FRI-2039 expects this to be an `internal: true` Docker network: one with no
+ * route off itself, which is what makes egress deny-by-default STRUCTURAL
+ * rather than a rule something has to remember to apply. The cloud metadata
+ * endpoint is then unreachable because there is no path to it.
+ */
 const BUILDER_NETWORK = process.env.BROKER_BUILDER_NETWORK ?? "";
+/**
+ * The allowlisted hole back out (FRI-2039): the daemon's CONNECT proxy.
+ *
+ * Set by the OPERATOR here, never by the caller — `ALLOWED_ENV` below does not
+ * include the proxy variables, so a caller cannot point a builder at a proxy
+ * of its own choosing and cannot unset them to try its luck directly. Unset
+ * means no proxy is offered, which on an internal network is egress fully
+ * closed.
+ */
+const EGRESS_PROXY = process.env.BROKER_EGRESS_PROXY ?? "";
 const MEM_LIMIT_BYTES = Number(process.env.BROKER_MEM_LIMIT_BYTES ?? 2 * 1024 * 1024 * 1024);
 const NANO_CPUS = Number(process.env.BROKER_NANO_CPUS ?? 2_000_000_000); // 2 CPUs
 const PIDS_LIMIT = Number(process.env.BROKER_PIDS_LIMIT ?? 512);
@@ -137,6 +154,23 @@ function safeJson(s) {
 }
 
 /** A task id must be safe to use as a container and volume name. */
+/**
+ * Hosts a builder must reach WITHOUT the proxy: the daemon itself.
+ *
+ * Derived from the proxy URL rather than configured separately, because they
+ * are the same process — the daemon is both the API the worker calls and the
+ * proxy it goes out through. Two settings that must agree is a way for them to
+ * disagree.
+ */
+export function egressNoProxy(proxyUrl) {
+  try {
+    const host = new URL(proxyUrl).hostname;
+    return ["localhost", "127.0.0.1", host].filter(Boolean).join(",");
+  } catch {
+    return "localhost,127.0.0.1";
+  }
+}
+
 function validTaskId(id) {
   return typeof id === "string" && /^[a-z0-9][a-z0-9_.-]{0,62}$/.test(id);
 }
@@ -149,6 +183,24 @@ export function buildContainerSpec(taskId, callerEnv) {
   const env = Object.entries(callerEnv ?? {})
     .filter(([k]) => ALLOWED_ENV.has(k))
     .map(([k, v]) => `${k}=${String(v)}`);
+  if (EGRESS_PROXY) {
+    // Both spellings: tools disagree on case, and a tool that reads neither
+    // simply fails closed on an internal network, which is the right default.
+    //
+    // `NO_PROXY` carries the proxy's own host because that host is also the
+    // daemon — the worker's API calls, git route and command channel all go
+    // there, and routing them through CONNECT would refuse them (not on the
+    // allowlist, and not port 443).
+    const noProxy = egressNoProxy(EGRESS_PROXY);
+    env.push(
+      `HTTPS_PROXY=${EGRESS_PROXY}`,
+      `https_proxy=${EGRESS_PROXY}`,
+      `HTTP_PROXY=${EGRESS_PROXY}`,
+      `http_proxy=${EGRESS_PROXY}`,
+      `NO_PROXY=${noProxy}`,
+      `no_proxy=${noProxy}`,
+    );
+  }
   return {
     Image: BUILDER_IMAGE,
     Env: env,
