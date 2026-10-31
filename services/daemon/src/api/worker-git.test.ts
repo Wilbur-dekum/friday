@@ -273,10 +273,17 @@ describe("a Builder pushes its branch back (FRI-2077)", () => {
     }
   }
 
-  it("accepts the push, and the ref lands in STAGING — not in the source repo", async () => {
-    // The ticket, end to end. Where the ref lands is the whole point: the
-    // mirror's `--prune` refresh would eat it, and a local-path repo is the
-    // user's own checkout.
+  it("accepts the push, and the ref lands in STAGING", async () => {
+    // Where `receive-pack` writes is the whole point of slice 1: the mirror's
+    // `--prune` refresh would eat the ref, and a local-path repo is the user's
+    // own checkout.
+    //
+    // This asserts only on staging. It USED to also assert the source repo was
+    // untouched, which slice 3 deliberately made false — the forward puts the
+    // ref there on purpose. Worse, that assertion passed only by racing the
+    // forward (it runs after `res.end()`), so it was green in isolation and
+    // red under a loaded suite. The forward's arrival is asserted properly, by
+    // polling, in the slice 3 case below.
     const token = await builderWithRepo("builder-1", repo);
     const staging = workspaceMod.ensureStagingRepo({
       name: "builder-1",
@@ -287,9 +294,6 @@ describe("a Builder pushes its branch back (FRI-2077)", () => {
     const { sha } = await cloneCommitPush(token, "builder-1");
 
     expect(refSha(staging, "refs/heads/friday/builder-1")).toBe(sha);
-    // The source repo is untouched — no Builder ref appears in the daily
-    // driver's own checkout.
-    expect(refSha(join(repo, ".git"), "refs/heads/friday/builder-1")).toBeNull();
   });
 
   it("answers the push advertisement from staging, so the delta is computed against it", async () => {

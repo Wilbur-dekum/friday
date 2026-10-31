@@ -125,10 +125,15 @@ function spawned(agentName = "builder-fri-1") {
 }
 
 describe("creating the container", () => {
-  it("asks for a task id and a FOUR-KEY env, never a container spec", async () => {
+  it("asks for a task id and a FIVE-KEY env, never a container spec", async () => {
     // What keeps the broker a narrow seam rather than the Docker socket with
     // extra steps is that the caller does not describe the container. If this
     // request ever grows an Image, Mounts or HostConfig, that property is gone.
+    //
+    // The key count is pinned deliberately: every addition has to be argued
+    // for here. `FRIDAY_WORKSPACE_BRANCH` is FRI-2076's — the branch the
+    // worker checks out after cloning `/workspace` — and the broker's own
+    // allowlist has to grow with it or it is silently dropped.
     spawned();
     await settle();
     expect(calls[0]!.method).toBe("POST");
@@ -140,6 +145,7 @@ describe("creating the container", () => {
       "FRIDAY_DAEMON_URL",
       "FRIDAY_TASK_ID",
       "FRIDAY_WORKER_TOKEN",
+      "FRIDAY_WORKSPACE_BRANCH",
     ]);
     expect(Object.keys(body)).toEqual(["taskId", "env"]);
   });
