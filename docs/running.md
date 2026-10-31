@@ -551,6 +551,30 @@ A clone failure fails the turn with a visible reason rather than throwing: it
 runs before the turn starts, where an exception would kill the worker with
 nothing to show the user.
 
+### Verifying it in a real container
+
+`container-builder.e2e.test.ts` runs the whole chain against the real builder
+image: the daemon side in-process (git route, staging repo, ref gate, forward),
+the client side as a `docker run` reaching back over `host.docker.internal`. It
+is the only test that can answer whether the code works inside the artifact a
+Builder actually runs in — that the image has a git which speaks the route's
+smart-HTTP, that a container can authenticate with the per-worker token, and
+that `ensureContainerWorkspace` works against the compiled `dist` rather than
+the TypeScript source.
+
+It needs an image built from the branch under test:
+
+```bash
+docker build --target worker -t friday-worker:e2e .
+FRIDAY_E2E_BUILDER_IMAGE=friday-worker:e2e pnpm test:e2e
+```
+
+Without `FRIDAY_E2E_BUILDER_IMAGE` it looks for `friday-worker:latest`. It
+**skips itself** when Docker is unreachable or when the image does not contain
+`workspace-clone.js` — a stale image would silently exercise old code, which is
+worse than not running at all. A skip is therefore a real result: it means the
+chain was not verified against a container, not that it passed.
+
 ### Hostname and the reverse proxy
 
 The stack runs behind a Caddy reverse proxy on **<http://friday.localhost>**, not bare `localhost:7615`. That is deliberate: BetterAuth derives absolute URLs, the CSRF origin list and the session cookie's `Secure`/`__Secure-` prefix from its `baseURL`, and **hard-exits** when a configured public URL is not among `trustedOrigins`. Exercising a real hostname in dev is the only way to meet that before a Deployment does.
