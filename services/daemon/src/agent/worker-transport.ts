@@ -108,6 +108,29 @@ class ChannelTransport implements WorkerTransport {
     process.exit(1);
   }
 
+  /**
+   * Drop the socket WITHOUT the exit that losing the channel means.
+   *
+   * Test-only, and the production path has no equivalent on purpose: a worker
+   * that loses its channel must exit, so there is nothing for a deliberate
+   * shutdown to do. Tests need it because a transport dialed and discarded is
+   * still mid-handshake, and the pending upgrade errors once the test's server
+   * closes — which is `die` doing exactly its job, into a runner that is not
+   * a worker. Muting `process.exit` for the window instead is what this file
+   * used to do, and it lost the race: the error can arrive after `afterEach`
+   * has restored the real one, and then the exit takes the whole suite down
+   * with 1493 tests passing.
+   */
+  __disposeForTest(): void {
+    this.ws.removeAllListeners();
+    // `terminate` on a socket that never finished connecting emits
+    // "WebSocket was closed before the connection was established" — and with
+    // no listener left, `ws` raises that as an uncaught exception, which is
+    // the same failure wearing a different hat. Swallow it deliberately.
+    this.ws.on("error", () => {});
+    this.ws.terminate();
+  }
+
   private rawSend(e: WorkerEvent): void {
     try {
       this.ws.send(JSON.stringify(e));
@@ -173,4 +196,14 @@ export function resolveWorkerTransport(env: NodeJS.ProcessEnv = process.env): Wo
     );
   }
   return new ChannelTransport(daemonUrl, token);
+}
+
+/**
+ * Tear down a transport a test dialed. No-op for the IPC transport, which
+ * holds no socket.
+ */
+export function __disposeTransportForTest(t: WorkerTransport): void {
+  if ("__disposeForTest" in t && typeof t.__disposeForTest === "function") {
+    (t as { __disposeForTest: () => void }).__disposeForTest();
+  }
 }

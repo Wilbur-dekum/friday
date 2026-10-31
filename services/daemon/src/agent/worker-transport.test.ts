@@ -1,7 +1,12 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { channelUrlFor, resolveWorkerTransport, type WorkerTransport } from "./worker-transport.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  channelUrlFor,
+  resolveWorkerTransport,
+  __disposeTransportForTest,
+  type WorkerTransport,
+} from "./worker-transport.js";
 import { attachWorkerChannel, type WorkerChannel } from "../api/worker-channel.js";
 import { __resetWorkerTokensForTest, mintWorkerToken } from "./worker-tokens.js";
 import type { WorkerCommand, WorkerEvent } from "./worker-protocol.js";
@@ -31,22 +36,39 @@ vi.mock("./worker-runtime.js", async (importOriginal) => ({
 
 let server: Server;
 let channels: WorkerChannel[];
+/** Every transport `dial` handed out, so none outlives its server. */
+let dialed: WorkerTransport[];
 let daemonUrl: string;
 /** `process.send` presence is what picks the transport, so it is controlled. */
 let origSend: typeof process.send;
 /**
- * `process.exit` is stubbed for every case, not just the ones that assert on
- * it: a transport opened by an earlier test outlives its server, and when
- * `afterEach` closes that server the transport correctly tries to exit. That
- * is the behaviour under test — it just must not take the runner with it.
+ * `process.exit` is stubbed for the WHOLE FILE, not per case.
+ *
+ * Every transport here dials a real socket, and `die` calling `process.exit`
+ * is the behaviour under test — it just must not take the runner with it. Per
+ * test was not enough: `afterEach`'s `vi.restoreAllMocks` puts the real exit
+ * back, and a socket still mid-handshake errors into `die` after that, which
+ * is how this file killed a CI run with all 1493 tests passing. Stubbed in
+ * `beforeAll`, cleared per test so the call-count assertions stay isolated,
+ * and restored only once everything is torn down.
  */
 let exitSpy: ReturnType<typeof vi.spyOn>;
+let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+beforeAll(() => {
+  exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+});
+
+afterAll(() => {
+  exitSpy.mockRestore();
+});
 
 beforeEach(async () => {
   __resetWorkerTokensForTest();
   channels = [];
-  exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
-  vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  dialed = [];
+  exitSpy.mockClear();
+  stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   origSend = process.send;
   delete (process as { send?: unknown }).send;
   server = createServer((_req, res) => res.writeHead(404).end());
@@ -57,18 +79,27 @@ beforeEach(async () => {
 
 afterEach(async () => {
   process.send = origSend;
+  // Client side first, and before `vi.restoreAllMocks` below. A transport that
+  // is still mid-handshake is not in `channels` yet, so closing the server
+  // would error its pending upgrade into `die` — correct behaviour, reaching a
+  // runner that is not a worker, with the real `process.exit` already back.
+  for (const t of dialed) __disposeTransportForTest(t);
   // `server.close` waits for live connections, and the worker's channel is one
   // — without this the hook times out rather than the test failing.
   for (const c of channels) c.close("test over");
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   __resetWorkerTokensForTest();
-  vi.restoreAllMocks();
+  // NOT `restoreAllMocks` — that would put the real `process.exit` back while
+  // a late socket error can still reach `die`. See `exitSpy`'s note.
+  stderrSpy.mockRestore();
 });
 
 function dial(): WorkerTransport {
   const token = mintWorkerToken({ callerName: "builder-1", callerType: "builder" });
-  return resolveWorkerTransport({ FRIDAY_DAEMON_URL: daemonUrl, FRIDAY_WORKER_TOKEN: token });
+  const t = resolveWorkerTransport({ FRIDAY_DAEMON_URL: daemonUrl, FRIDAY_WORKER_TOKEN: token });
+  dialed.push(t);
+  return t;
 }
 
 async function connected(): Promise<WorkerChannel> {
@@ -180,7 +211,9 @@ describe("the channel transport, end to end", () => {
   });
 
   it("exits when the daemon refuses the token rather than retrying forever", async () => {
-    resolveWorkerTransport({ FRIDAY_DAEMON_URL: daemonUrl, FRIDAY_WORKER_TOKEN: "never-minted" });
+    dialed.push(
+      resolveWorkerTransport({ FRIDAY_DAEMON_URL: daemonUrl, FRIDAY_WORKER_TOKEN: "never-minted" }),
+    );
     for (let i = 0; i < 100 && exitSpy.mock.calls.length === 0; i++)
       await new Promise((r) => setTimeout(r, 5));
     expect(exitSpy).toHaveBeenCalledWith(1);
