@@ -1,5 +1,6 @@
 import { logger } from "../log.js";
 import { resolveWorkerToken, type WorkerIdentity } from "./worker-tokens.js";
+import * as registry from "./registry.js";
 import type { WorkerChannel } from "../api/worker-channel.js";
 import {
   localProcessRuntime,
@@ -121,16 +122,32 @@ class ContainerWorkerHandle implements WorkerHandle {
   }
 
   private async create(req: WorkerSpawnRequest): Promise<void> {
+    // FRI-2076: the branch the clone must land on. Resolved here, from the
+    // registry, rather than threaded through `WorkerSpawnOptions` — every
+    // dispatch path that can spawn a Builder converges on this one place, so
+    // there is no site left to forget it. Absent (not a Builder, or a row
+    // without one) simply means the clone stays on the default branch.
+    let workspaceBranch = "";
+    try {
+      const agent = await registry.getAgent(this.identity.callerName);
+      if (agent && "branch" in agent && agent.branch) workspaceBranch = agent.branch;
+    } catch (err) {
+      logger.log("warn", "worker.container.branch.lookup-fail", {
+        agent: this.identity.callerName,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
     const body = {
       taskId: this.taskId,
       // The broker filters this through its own allowlist; passing more would
       // be filtered out, not honoured. Only what the worker needs to reach
-      // home and name itself.
+      // home, name itself, and fill its workspace.
       env: {
         FRIDAY_WORKER_TOKEN: req.env.FRIDAY_WORKER_TOKEN ?? "",
         FRIDAY_DAEMON_URL: this.broker.daemonUrl,
         FRIDAY_AGENT_NAME: this.identity.callerName,
         FRIDAY_TASK_ID: this.taskId,
+        FRIDAY_WORKSPACE_BRANCH: workspaceBranch,
       },
     };
     let res = await this.brokerFetch("POST", "/builders", body);

@@ -59,6 +59,7 @@ import { runHooks } from "@friday/shared";
 import "../hooks/register.js";
 import { denyBuiltinAskUserQuestion } from "../hooks/block-builtin-ask-user-question.js";
 import { captureShellEnv, claudeCodeChildEnv, getResolvedShellEnv } from "../shell-env.js";
+import { ensureContainerWorkspace } from "./workspace-clone.js";
 import { logger } from "../log.js";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
@@ -209,6 +210,21 @@ async function mainLoop(): Promise<void> {
   // shell-env issues.
   await shellEnvCapturePromise;
   await unlockVault();
+  // FRI-2076: fill `/workspace` before the first turn. A containerised Builder
+  // gets an empty volume from the broker, and the repo it needs is served by
+  // the daemon — this is the client of that route. A no-op for a forked worker,
+  // which has a real worktree, and for a reattached volume that already holds a
+  // clone. Reported rather than thrown: the turn should fail with a visible
+  // reason, not die before it starts.
+  const cloned = await ensureContainerWorkspace(process.env, workerOpts.workingDirectory);
+  if (cloned.state === "failed") {
+    emit({
+      type: "error",
+      message: `workspace could not be provisioned: ${cloned.reason ?? "unknown"}`,
+      recoverable: false,
+    });
+    process.exit(1);
+  }
   try {
     while (!stopped) {
       if (pendingPrompt) {

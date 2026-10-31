@@ -65,6 +65,8 @@ const ALLOWED_ENV = new Set([
   "FRIDAY_DAEMON_URL",
   "FRIDAY_AGENT_NAME",
   "FRIDAY_TASK_ID",
+  // FRI-2076: the branch the worker checks out after cloning /workspace.
+  "FRIDAY_WORKSPACE_BRANCH",
 ]);
 
 /** Containers this broker started, so it only ever stops its own. */

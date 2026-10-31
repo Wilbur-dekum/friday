@@ -2404,12 +2404,16 @@ async function createAgent(
           },
         };
       }
-      logger.log("warn", "builder.workspace.container-not-provisioned", {
+      // FRI-2076: the workspace is filled by the worker, not here — it is the
+      // only party holding the per-worker token the git route needs, and it is
+      // the container's entrypoint, so "at startup" and "before the Claude
+      // Code child" are the same moment. See `ensureContainerWorkspace`.
+      logger.log("info", "builder.workspace.container", {
         agent: body.name,
         repo,
         branch,
         path: CONTAINER_WORKSPACE_PATH,
-        note: "container mode: the repo is servable (FRI-2076) but nothing clones it into /workspace yet",
+        note: "the worker clones the daemon-served repo into /workspace at startup",
       });
     } else {
       try {

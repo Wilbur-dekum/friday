@@ -520,11 +520,36 @@ carried out. In every failure case the ref stays in staging, which nothing
 prunes, so a later push retries it; that is the entire reason pushes land there
 rather than in the mirror.
 
-**Still missing:** the clone. Spawning a Builder with container mode on still
-logs `builder.workspace.container-not-provisioned` — the repo is servable, and
-a push now round-trips all the way to the destination, but nothing runs
-`git clone` into `/workspace`, so the volume stays empty. That is FRI-2076's
-unshipped half, not part of FRI-2077.
+**Landed (FRI-2076, the clone half): the worker fills `/workspace`.** FRI-2076
+shipped the serve side with no client, so the broker's empty volume stayed
+empty. `ensureContainerWorkspace` is that client, and it runs at worker startup
+— before the first turn, and before the Claude Code child exists.
+
+The **worker** does it, not the broker or an image entrypoint, for one reason:
+the clone needs the per-worker bearer token and the worker is the only party
+holding one. The broker is deliberately dependency-free and holds no Friday
+credential, and the image is built once for every Builder. The worker is also
+the container's entrypoint (FRI-2079), so "at startup" and "before the agent
+runs" are the same moment.
+
+It is **idempotent**, which is not an optimization. A builder volume is
+per-assignment and is reattached across container restarts — a stall kill, a
+wedge respawn, a daemon crash — so a `/workspace` that already has a `.git` is
+left exactly as it is. Re-cloning would discard uncommitted work every time.
+
+The clone lands on the source repo's default branch, because the served repo is
+the user's own and its `HEAD` is not per-Builder, so the worker then checks out
+the Builder's branch. That branch arrives as `FRIDAY_WORKSPACE_BRANCH`, resolved
+from the registry in `container-runtime.ts` rather than threaded through
+`WorkerSpawnOptions`: every dispatch path that can spawn a Builder converges
+there, so no call site can forget it. The broker's `ALLOWED_ENV` has to carry
+it too — that allowlist is what stops a caller setting `NODE_OPTIONS`, so a new
+key is dropped silently until it is added, and `container-runtime.test.ts` pins
+the key count so an addition has to be argued for.
+
+A clone failure fails the turn with a visible reason rather than throwing: it
+runs before the turn starts, where an exception would kill the worker with
+nothing to show the user.
 
 ### Hostname and the reverse proxy
 
