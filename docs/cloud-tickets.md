@@ -865,23 +865,42 @@ container ephemerality illusory, so the regex layer should deny it explicitly.
 
 ### FRI-2043 — Retire M2/M5 and rewrite `docs/sandbox.md`
 
-`task` · parent FRI-2036 · ADR-054
+`task` · parent FRI-2036 · ADR-054 · **done**
 
 `sandbox-exec` is macOS-only and **fails open** on Linux:
 `sandboxExecAvailable()` treats a missing `/usr/bin/sandbox-exec` as "disabled",
 so builders silently run with no kernel isolation and no error. M2's deny-list
 targets macOS surfaces with no Linux analog (`~/Library/Keychains`, `launchctl`,
 `osascript`, `tccutil`), and M5's `ulimit -t`/`-n` were chosen for _Darwin_
-semantics. Containment becomes cgroups plus container lifetime; the doc needs
+semantics. Containment becomes cgroups plus container lifetime; the doc needed
 rewriting around that rather than patching.
 
-FRI-2062 settled the decision this implements and wrote an interim "Linux and
-containers" section into `docs/sandbox.md` — the per-layer table, the boundary
-decision, and the accepted residual risk. Scope here narrows to the rewrite:
-restructure the document around the container model instead of leaving M1–M5 as
-the primary narrative with a correction bolted in front, and fold in whatever
-FRI-2038/2039 land. Do not re-litigate the decision. Note M5 is NOT retired on
-Linux — its `ulimit`s are enforced there, unlike on Darwin.
+The document now leads with the container as the boundary and the distinction
+that actually determines what protects a given worker: a **forked worker** (the
+daemon's own child, wrapped in `bash -c 'ulimit …'` and on macOS in
+`sandbox-exec`) versus a **containerised builder** (a separate container per
+task, created by the broker, which the daemon does not fork). A per-layer table
+answers both columns, because a single "does this layer apply" answer was the
+thing making the old structure wrong.
+
+**M5's rlimits turned out NOT to reach a containerised builder** — the note in
+this ticket said to record that they are enforced on Linux, which is true but
+not the live question. Measured: `container-runtime.ts` never references the
+`limits` it is handed, and the broker spec sets no `Ulimits`, so neither
+`ulimit -t` nor `ulimit -n` is in that path. The rlimits themselves are real on
+Linux (`ulimit -t 5; ulimit -n 64` holds inside the builder image and children
+inherit it) — the spawn path is what drops them, not the platform.
+
+Consequence, now recorded as residual risk: a containerised builder has **no
+CPU-time ceiling** (`NanoCpus` throttles rate, not total) and **no
+file-descriptor cap**. An infinite loop that `ulimit -t 3600` would have killed
+at an hour instead runs until the turn-stall watchdog fires on 30 minutes of no
+`block-stop`. Wall-clock cover for the same failure from a different layer, not
+a replacement for the limit. Filed as FRI-2083.
+
+M2 stays in the tree and stays tested rather than being deleted: the laptop is
+still how Friday is developed. What changed is that it is no longer presented as
+a layer of the deployment model.
 
 ### FRI-2059 — Scrub the Claude Code child's env — the real untrusted-code boundary
 
@@ -1389,7 +1408,7 @@ there is nothing to orchestrate the upgrade of.
 
 ## FRI-2068 — E6: Cleanup and backlog
 
-`epic` · 10 tasks
+`epic` · 11 tasks
 
 The holding epic for work that is real but blocks no other epic.
 
@@ -1402,6 +1421,32 @@ misreport that epic's completeness.
 by it. A ticket that is merely LOW PRIORITY but does block an epic task stays
 with that epic — priority and blocking are different axes, and only blocking
 decides placement.
+
+### FRI-2083 — A containerised builder has no CPU-time or fd limit
+
+`bug` · parent FRI-2068
+
+Found while rewriting `docs/sandbox.md` for FRI-2043. M5 wraps a forked worker
+in `bash -c 'ulimit -t 3600; ulimit -n 4096; exec node …'`, and
+`lifecycle.ts` duly passes `limits: { cpuSeconds, openFiles }` into the runtime
+seam — but **`container-runtime.ts` never reads it**, and the broker's container
+spec sets no `Ulimits` field. So a containerised builder runs with neither cap.
+
+What it does have is cgroups: `Memory` 2 GiB and `PidsLimit` 512 are hard caps,
+but `NanoCpus` throttles CPU **rate**, not total. So there is no CPU-time
+ceiling at all. An honest infinite loop that `ulimit -t` would have killed at
+one hour instead runs until the turn-stall watchdog notices no `block-stop` for
+30 minutes — the same failure covered at wall-clock by a different layer, which
+is not the same as the limit being present.
+
+Not a platform problem: the rlimits are real on Linux. Measured inside the
+builder image, `ulimit -t 5; ulimit -n 64` holds and children inherit it. It is
+the spawn path that drops them.
+
+Fix: set `Ulimits` in `buildContainerSpec` from broker config, defaulting to
+the same values the forked path uses, so the two shapes of worker get the same
+ceiling. Broker config rather than caller-supplied, like every other limit
+there.
 
 ### FRI-2082 — `sync harness` e2e dies on EADDRINUSE from a leaked zero-cache worker
 
