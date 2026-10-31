@@ -66,10 +66,15 @@ describe.skipIf(skip)("provisionPostgres (end-to-end)", () => {
 
   it("populates blocks.content_tsv via the FTS setup", async () => {
     ensureTestZeroSecret();
-    await provisionPostgres({ log: () => {} });
+    // Use the URL `provisionPostgres` RETURNS, not `process.env.DATABASE_URL`.
+    // Provisioning writes that var to `~/.friday/.env` (a tmpdir here) and
+    // never into `process.env`, so reading it back got `undefined`, `pg` fell
+    // through to its own defaults, and the test failed against a database
+    // named after the OS user — `database "<user>" does not exist`. The `!`
+    // assertion is what let an absent value look like a present one.
+    const { databaseUrl } = await provisionPostgres({ log: () => {} });
 
     // Insert + verify tsvector against the live DB.
-    const databaseUrl = process.env.DATABASE_URL!;
     const pgPkg = await import("pg");
     const c = new pgPkg.default.Client({ connectionString: databaseUrl });
     await c.connect();
