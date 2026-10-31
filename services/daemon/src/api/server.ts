@@ -183,7 +183,7 @@ import {
   workerFromRequest,
   WORKER_FACING_ROUTES,
 } from "./worker-listener.js";
-import { attachEgressProxy } from "./worker-egress.js";
+import { attachEgressProxy, createHttpEgressHandler } from "./worker-egress.js";
 import { attachWorkerChannel } from "./worker-channel.js";
 import { handleWorkerGit } from "./worker-git.js";
 import {
@@ -218,7 +218,12 @@ export function startServer(opts: StartServerOptions) {
   // route added tomorrow is loopback-only by default.
   const workerListen = resolveWorkerListen();
   if (workerListen) {
+    // FRI-2039: plain-HTTP egress. Checked FIRST, and it claims only
+    // absolute-form requests (`http://host/path`) — the worker-facing routes
+    // arrive in origin-form, so the two cannot shadow each other.
+    const httpEgress = createHttpEgressHandler();
     const workerServer = createServer((req, res) => {
+      if (httpEgress(req, res)) return;
       void handleWorkerFacing(req, res, cfg);
     });
     // FRI-2038: the worker command channel. On this listener only — it is a

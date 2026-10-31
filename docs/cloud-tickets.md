@@ -804,10 +804,27 @@ own choosing has no control at all. `NO_PROXY` is derived from the proxy URL
 rather than configured separately, because they are the same process and two
 settings that must agree are a way for them to disagree.
 
-Still open, deliberately: **plain HTTP is not proxied at all.** One port, 443.
-A build that needs `http://` fails closed rather than getting an unencrypted
-channel out. `FRIDAY_EGRESS_PORT` exists because the success path is otherwise
-untestable (443 needs root to bind) and the 443 default is pinned by a test.
+**Plain HTTP is proxied too**, as a forwarded absolute-form request rather
+than a tunnel. "Fails closed" was the right answer only while nothing needed
+it. This is a larger authority than CONNECT and is bounded accordingly: CONNECT
+only opens a socket and shovels bytes the daemon cannot read, while forwarding
+has the daemon ISSUE a request for untrusted code — an SSRF primitive whose
+only bounds are the allowlist and the address check. Hence **redirects are not
+followed**: a `302` to `http://169.254.169.254/` would otherwise turn a checked
+request into an unchecked one, so the response is relayed as-is and the
+client's own retry re-enters the check from scratch.
+
+Which header authenticated the hop decides what travels on.
+`Proxy-Authorization` is hop-by-hop and always stripped; `Authorization` is
+stripped only when it was what authenticated the proxy, because otherwise it is
+the builder's own upstream credential and private registries need it. The
+broker puts the worker token in the proxy URL as userinfo, since `npm` and
+`git` will not set a proxy header by hand but every client honouring
+`HTTPS_PROXY` turns userinfo into a Basic credential.
+
+Still one port per scheme: 443 for CONNECT, 80 for HTTP. `FRIDAY_EGRESS_PORT`
+and `FRIDAY_EGRESS_HTTP_PORT` exist because the success paths are otherwise
+untestable (both need root to bind) and both defaults are pinned by tests.
 
 ### FRI-2040 — Per-Organization network isolation
 

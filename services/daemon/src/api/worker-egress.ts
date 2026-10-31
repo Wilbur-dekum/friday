@@ -1,13 +1,21 @@
 import { lookup } from "node:dns/promises";
 import { connect, type Socket } from "node:net";
-import type { IncomingMessage, Server } from "node:http";
+import {
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { logger } from "../log.js";
+import { writeJson } from "./router.js";
 import { workerFromRequest } from "./worker-listener.js";
+import { resolveWorkerToken as resolveWorkerTokenValue } from "../agent/worker-tokens.js";
 import {
   checkDestination,
   isBlockedAddress,
   resolveEgressAllowlist,
   resolveEgressPort,
+  resolveHttpEgressPort,
 } from "./egress-allowlist.js";
 
 /**
@@ -57,6 +65,59 @@ import {
  * outright rather than filtered down to the allowed ones: that shape is what a
  * rebinding attempt looks like, and no legitimate destination needs it.
  */
+
+/**
+ * Headers that belong to THIS hop and must never be forwarded upstream.
+ *
+ * RFC 9110's hop-by-hop set, plus `proxy-authorization` — which is the
+ * builder's credential for the proxy, not for the destination, and forwarding
+ * it would hand a worker token to whatever it was talking to.
+ */
+const HOP_BY_HOP = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+/**
+ * Who is asking, and which header said so.
+ *
+ * `Proxy-Authorization` is the correct header for a proxy and the one real
+ * tools send when the proxy URL carries credentials, which is how the broker
+ * configures it. `Authorization` is also accepted because CONNECT has used it
+ * since slice 2 — but for a forwarded request WHICH header authenticated
+ * matters: `Authorization` belongs to the destination, so if that is what
+ * authenticated the hop it has to be stripped rather than passed on, and if it
+ * is not, it is the builder's own upstream credential and must be left alone.
+ */
+function proxyIdentity(req: IncomingMessage): {
+  identity: ReturnType<typeof workerFromRequest>;
+  consumedAuthorization: boolean;
+} {
+  const viaProxyHeader = req.headers["proxy-authorization"];
+  if (typeof viaProxyHeader === "string") {
+    const m = /^(?:Bearer|Basic) (.+)$/i.exec(viaProxyHeader.trim());
+    const raw = m?.[1];
+    if (raw) {
+      // Bearer carries the token directly; Basic carries it as the password,
+      // which is the shape a proxy URL with credentials produces.
+      const asBearer = resolveWorkerTokenValue(raw);
+      if (asBearer) return { identity: asBearer, consumedAuthorization: false };
+      const decoded = Buffer.from(raw, "base64").toString("utf8");
+      const pass = decoded.slice(decoded.indexOf(":") + 1);
+      const asBasic = resolveWorkerTokenValue(pass);
+      if (asBasic) return { identity: asBasic, consumedAuthorization: false };
+    }
+    return { identity: null, consumedAuthorization: false };
+  }
+  return { identity: workerFromRequest(req), consumedAuthorization: true };
+}
 
 /** How long to wait for the upstream TCP connection before giving up. */
 const UPSTREAM_CONNECT_TIMEOUT_MS = 10_000;
@@ -110,7 +171,7 @@ export function attachEgressProxy(server: Server, env: NodeJS.ProcessEnv = proce
   server.on("connect", (req: IncomingMessage, socket: Socket, head: Buffer) => {
     socket.on("error", () => socket.destroy());
 
-    const identity = workerFromRequest(req);
+    const { identity } = proxyIdentity(req);
     if (!identity) {
       // Same rule the routes follow: the per-worker token only, never the
       // shared daemon secret, which sits on a volume any builder can read.
@@ -181,4 +242,145 @@ export function attachEgressProxy(server: Server, env: NodeJS.ProcessEnv = proce
       upstream.on("close", () => socket.destroy());
     })();
   });
+}
+
+/**
+ * Plain-HTTP egress (FRI-2039).
+ *
+ * CONNECT covers TLS, which is nearly everything — but a build that fetches
+ * `http://` got nothing at all, and "fails closed" is only the right answer
+ * while nobody needs the thing. This forwards absolute-form requests
+ * (`GET http://host/path HTTP/1.1`, which is how a client addresses a proxy
+ * for cleartext) to the same allowlist.
+ *
+ * ## This is a bigger authority than CONNECT, and worth naming
+ *
+ * CONNECT only ever had the daemon open a TCP socket and shovel bytes it could
+ * not read. Here the daemon ISSUES an HTTP request on behalf of untrusted code
+ * — an SSRF primitive whose only bounds are the allowlist and the address
+ * check. Three consequences handled explicitly:
+ *
+ *  1. **Redirects are not followed.** `http.request` does not follow them and
+ *     this does not add it. A 302 to `http://169.254.169.254/` would otherwise
+ *     be a checked request turning into an unchecked one. The response is
+ *     relayed as-is and the client's own retry comes back through here and is
+ *     re-checked from scratch.
+ *  2. **The proxy credential is never forwarded.** `Proxy-Authorization` is
+ *     hop-by-hop, and if `Authorization` is what authenticated this hop it is
+ *     consumed rather than passed on — otherwise a builder's worker token
+ *     would be handed to whatever host it named.
+ *  3. **The upstream connection goes to a checked address**, exactly as in
+ *     CONNECT, with `Host` preserved so the destination still routes and
+ *     name-based virtual hosts still work.
+ */
+export function createHttpEgressHandler(
+  env: NodeJS.ProcessEnv = process.env,
+): (req: IncomingMessage, res: ServerResponse) => boolean {
+  const allow = resolveEgressAllowlist(env);
+  const httpPort = resolveHttpEgressPort(env);
+
+  return (req, res) => {
+    // Absolute-form is the ONLY shape a proxy request takes, which is what
+    // keeps this from shadowing the worker-facing routes: those arrive in
+    // origin-form (`/api/...`) and are not ours.
+    if (!req.url || !/^http:\/\//i.test(req.url)) return false;
+
+    let url: URL;
+    try {
+      url = new URL(req.url);
+    } catch {
+      writeJson(res, 400, { error: "malformed absolute-form request" });
+      return true;
+    }
+
+    const { identity, consumedAuthorization } = proxyIdentity(req);
+    if (!identity) {
+      logger.log("warn", "egress.deny", { reason: "unauthenticated", target: req.url });
+      res.writeHead(407, { "proxy-authenticate": "Bearer" }).end();
+      return true;
+    }
+
+    const port = url.port ? Number(url.port) : httpPort;
+    const verdict = checkDestination(`${url.hostname}:${port}`, allow, httpPort);
+    if (!verdict.ok) {
+      logger.log("warn", "egress.deny", {
+        agent: identity.callerName,
+        target: `${url.hostname}:${port}`,
+        scheme: "http",
+        reason: verdict.reason,
+      });
+      writeJson(res, 403, { error: "destination is not permitted" });
+      return true;
+    }
+
+    void (async () => {
+      const resolved = await safeAddressFor(verdict.host);
+      if (resolved === null) {
+        logger.log("warn", "egress.deny", {
+          agent: identity.callerName,
+          host: verdict.host,
+          reason: "does not resolve",
+        });
+        writeJson(res, 502, { error: "destination did not resolve" });
+        return;
+      }
+      if ("blocked" in resolved) {
+        logger.log("error", "egress.deny", {
+          agent: identity.callerName,
+          host: verdict.host,
+          address: resolved.blocked,
+          reason: "allowlisted host resolved to a blocked address",
+        });
+        writeJson(res, 403, { error: "destination is not permitted" });
+        return;
+      }
+
+      const headers: Record<string, string | string[]> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (v === undefined) continue;
+        if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+        if (consumedAuthorization && k.toLowerCase() === "authorization") continue;
+        headers[k] = v;
+      }
+      // The name, not the address it resolved to: the destination still has to
+      // route this, and a name-based virtual host would otherwise 404.
+      headers.host = url.port ? `${verdict.host}:${url.port}` : verdict.host;
+
+      const upstream = httpRequest(
+        {
+          host: resolved.address,
+          port: verdict.port,
+          method: req.method,
+          // Origin-form for the destination; absolute-form is for us.
+          path: `${url.pathname}${url.search}`,
+          headers,
+        },
+        (upRes) => {
+          const out: Record<string, string | string[]> = {};
+          for (const [k, v] of Object.entries(upRes.headers)) {
+            if (v === undefined) continue;
+            if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+            out[k] = v;
+          }
+          logger.log("info", "egress.allow", {
+            agent: identity.callerName,
+            host: verdict.host,
+            address: resolved.address,
+            port: verdict.port,
+            scheme: "http",
+            status: upRes.statusCode,
+          });
+          res.writeHead(upRes.statusCode ?? 502, out);
+          upRes.pipe(res);
+        },
+      );
+      upstream.setTimeout(UPSTREAM_CONNECT_TIMEOUT_MS, () => upstream.destroy());
+      upstream.on("error", () => {
+        if (!res.headersSent) writeJson(res, 502, { error: "destination is unreachable" });
+        else res.end();
+      });
+      req.pipe(upstream);
+    })();
+    return true;
+  };
 }

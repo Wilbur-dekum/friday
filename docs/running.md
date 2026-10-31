@@ -582,10 +582,30 @@ its own auth and supervision for no extra property. CONNECT tunnels bytes, so
 TLS stays end-to-end: the daemon decides _where_ a connection may go, never
 what crosses it.
 
+Plain `http://` is proxied too, as a **forwarded request** rather than a
+tunnel — absolute-form (`GET http://host/path`) is how a client addresses a
+proxy for cleartext. Same allowlist, same address check. It is a larger
+authority than CONNECT and is treated as such: CONNECT only has the daemon open
+a socket and shovel bytes it cannot read, whereas forwarding has it _issue_ a
+request on behalf of untrusted code. So **redirects are not followed** — a
+`302` to `http://169.254.169.254/` would turn a checked request into an
+unchecked one, so the response is relayed and the client's own retry comes back
+through the check — and the proxy credential is never passed upstream.
+
 | Knob                      | Meaning                                                                                                                          |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `FRIDAY_EGRESS_ALLOWLIST` | hosts a builder may reach. **Replaces** the default, so the set in force is visible in one place. `none` closes egress entirely. |
-| `FRIDAY_EGRESS_PORT`      | the single port proxied. Defaults to 443; exists so the success path is testable, since 443 needs root to bind.                  |
+| `FRIDAY_EGRESS_PORT`      | the single port CONNECT proxies. Defaults to 443; overridable so the success path is testable, since 443 needs root to bind.     |
+| `FRIDAY_EGRESS_HTTP_PORT` | the single port plain HTTP forwards to. Defaults to 80, same reasoning.                                                          |
+
+**Credentials.** The broker puts the worker's own token into the proxy URL as
+userinfo (`http://x-friday:<token>@friday:7611`), because `npm` and `git` will
+not set `Proxy-Authorization` by hand but every client that honours
+`HTTPS_PROXY` turns userinfo into a Basic credential. Which header
+authenticated the hop then decides what travels on: `Proxy-Authorization` is
+hop-by-hop and always stripped, and `Authorization` is stripped only when it
+was what authenticated the proxy — otherwise it is the builder's own upstream
+credential (a private registry token) and passing it through is the point.
 
 The default list is `api.anthropic.com` plus the npm/yarn registries — and
 notably **not** a git host, because FRI-2076/2077 put git behind the daemon's
