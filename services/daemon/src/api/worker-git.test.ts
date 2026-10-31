@@ -226,6 +226,18 @@ describe("what a worker may ask for", () => {
   });
 });
 
+/** What `ref` points at in `gitDir`, or null when it is absent. */
+function refSha(gitDir: string, ref: string): string | null {
+  try {
+    return execFileSync("git", ["--git-dir", gitDir, "rev-parse", "--verify", ref], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 describe("a Builder pushes its branch back (FRI-2077)", () => {
   /** Clone, commit, and push `ref` — the round trip a Builder actually makes. */
   async function cloneCommitPush(
@@ -259,18 +271,6 @@ describe("a Builder pushes its branch back (FRI-2077)", () => {
       { cwd: dest, timeout: 30_000 },
     );
     return { dest, sha };
-  }
-
-  /** What `ref` points at in `gitDir`, or null when it is absent. */
-  function refSha(gitDir: string, ref: string): string | null {
-    try {
-      return execFileSync("git", ["--git-dir", gitDir, "rev-parse", "--verify", ref], {
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
-    } catch {
-      return null;
-    }
   }
 
   it("accepts the push, and the ref lands in STAGING", async () => {
@@ -416,6 +416,26 @@ describe("the ref gate (FRI-2077, slice 2)", () => {
         encoding: "utf8",
       }).trim(),
     ).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("does NOT forward when the gate refused the push", async () => {
+    // A refused push is still a CLEAN backend exit — the hook's rejection
+    // travels in the response body, not the exit code. So "exited 0" was
+    // forwarding the SEEDED base commit as the Builder's branch, which made a
+    // branch appear at the destination holding none of the Builder's work, on
+    // the first push a Builder made, including one the gate refused.
+    //
+    // Measured in a real container before it was fixed: destination branch
+    // absent before the refused push, equal to the base commit after it.
+    const token = await builderWithRepo("builder-1", repo);
+    workspaceMod.ensureStagingRepo({ name: "builder-1", repo, branch: "friday/builder-1" });
+
+    await expect(pushRef(token, "builder-1", "refs/heads/main")).rejects.toThrow(/hook declined/);
+
+    // The forward runs after `res.end()`, so the push rejecting is not the
+    // signal that it did not happen. Give it the window it would have used.
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(refSha(join(repo, ".git"), "refs/heads/friday/builder-1")).toBeNull();
   });
 
   it("refuses another Builder's branch, not just main", async () => {

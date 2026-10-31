@@ -1,5 +1,6 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { promisify } from "node:util";
 import { basename, dirname } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger } from "../log.js";
@@ -143,6 +144,34 @@ function splitCgi(buf: Buffer): { headers: string; body: Buffer } | null {
  * A `raw` route: git's smart HTTP is a binary protocol, so the handler owns
  * `req`/`res` and nothing JSON-serializes the response.
  */
+const run = promisify(execFile);
+
+/**
+ * The staged branch heads, as one comparable string.
+ *
+ * Used to answer "did this push actually change anything?" — see the forward
+ * call in `handleWorkerGit`. Async on purpose: `execFileSync` here would block
+ * the event loop while the in-process server is mid-request, and the resulting
+ * deadlock reads exactly like a hung handler (measured, FRI-2076).
+ *
+ * Empty string on failure, which compares equal to itself and so suppresses
+ * the forward rather than triggering one on a guess.
+ */
+async function stagedHeads(gitDir: string): Promise<string> {
+  try {
+    const { stdout } = await run("git", [
+      "--git-dir",
+      gitDir,
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      "refs/heads",
+    ]);
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
 export async function handleWorkerGit(ctx: {
   req: IncomingMessage;
   res: ServerResponse;
@@ -244,6 +273,14 @@ export async function handleWorkerGit(ctx: {
     gitDir,
     push,
   });
+
+  // What staging held BEFORE the backend ran. A refused push is still a clean
+  // backend exit — the `update` hook's rejection travels in the response body,
+  // not the exit code — so "exited 0" does not mean a ref moved. Without this,
+  // the first push a Builder made would forward the SEEDED base commit as its
+  // branch, even when the gate refused every ref in it: a branch appearing at
+  // the destination with none of the Builder's work in it. Measured.
+  const headsBefore = push ? await stagedHeads(gitDir) : "";
 
   const child = spawn(backend, [], { env, stdio: ["pipe", "pipe", "pipe"] });
   let pending = Buffer.alloc(0);
@@ -355,6 +392,15 @@ export async function handleWorkerGit(ctx: {
     // throws, so the `void` is safe — but catch anyway, because an unhandled
     // rejection here would take the daemon down for a failed `git push`.
     if (verb === "git-receive-pack" && code === 0) {
+      // Nothing moved means nothing to carry — the gate refused the push, or
+      // the client sent one that was already up to date.
+      if ((await stagedHeads(gitDir)) === headsBefore) {
+        logger.log("info", "worker.git.forward.skipped", {
+          agent: identity.callerName,
+          reason: "no staged ref changed",
+        });
+        return;
+      }
       // Same derivation `githubContextFor` uses, rather than a new registry
       // accessor for one caller.
       const agent = await registry.getAgent(identity.callerName);
