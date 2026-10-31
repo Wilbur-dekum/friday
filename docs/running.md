@@ -488,10 +488,43 @@ accepted with no error anywhere. Both are pinned by tests that fail when either
 is removed. Unrelated to FRI-2042's deny-list, which is about hooks inside the
 container's clone; this one is daemon-side code Friday authors.
 
+**Landed (FRI-2077, slice 3): the forward.** Once `git-http-backend` exits
+cleanly on a `git-receive-pack` request, the daemon pushes
+`refs/heads/<branch>` from staging to its real destination — the GitHub remote
+for a remote repo, the user's own checkout for a local-path one (the faithful
+analogue of a daemon-owned Builder, whose branch already appears there). The
+upside of the whole indirection is the point: **the GitHub credential lives in
+the trusted tier and never enters the process running untrusted repository
+code.**
+
+It runs **in-process rather than in a `post-receive` hook.** The ticket reasons
+that the forward belongs in `post-receive` because it is the only hook where
+the objects are permanent; that constraint is about hook timing and is
+satisfied here too — this runs after the backend exited, by which point the
+refs are updated. Running in-process keeps the token out of a file on disk
+entirely, and a generated hook holding a GitHub token is a worse artifact than
+the indirection it saves. The token reaches `git` through the environment
+(`GIT_CONFIG_COUNT` + `http.extraHeader`), not argv, because
+`/proc/<pid>/cmdline` is world-readable while `/proc/<pid>/environ` is not.
+
+The cost, stated plainly: `post-receive`'s stderr reaches the client as
+`remote:` text and this does not. A Builder sees `* [new branch]` and learns
+nothing about whether the branch reached GitHub; it finds out when
+`friday-github` (FRI-2078) tries to open the PR.
+
+Two refusals are deliberate. The push is **not forced** — a diverged
+destination branch means someone else moved it, and silently overwriting that
+is the one outcome worse than not forwarding. And the refspec names **one ref**,
+so even a ref planted in staging by something other than a gated push is not
+carried out. In every failure case the ref stays in staging, which nothing
+prunes, so a later push retries it; that is the entire reason pushes land there
+rather than in the mirror.
+
 **Still missing:** the clone. Spawning a Builder with container mode on still
-logs `builder.workspace.container-not-provisioned` — the repo is servable and
-now writable, but nothing runs `git clone` into `/workspace`, so the volume
-stays empty. Slice 3 of FRI-2077 adds the `post-receive` forward to GitHub.
+logs `builder.workspace.container-not-provisioned` — the repo is servable, and
+a push now round-trips all the way to the destination, but nothing runs
+`git clone` into `/workspace`, so the volume stays empty. That is FRI-2076's
+unshipped half, not part of FRI-2077.
 
 ### Hostname and the reverse proxy
 

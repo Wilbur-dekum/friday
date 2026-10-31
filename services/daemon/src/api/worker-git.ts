@@ -6,6 +6,7 @@ import { logger } from "../log.js";
 import { writeJson } from "./router.js";
 import { workerFromRequest } from "./worker-listener.js";
 import { resolveRepoGitDir, stagingPathForAgent } from "../agent/workspace.js";
+import { forwardStagedRef } from "../agent/push-forward.js";
 import { isRepoAllowed, resolveRepoAllowlist } from "../agent/repo-allowlist.js";
 import * as registry from "../agent/registry.js";
 
@@ -50,10 +51,10 @@ import * as registry from "../agent/registry.js";
  *
  * Which means allowing `git-receive-pack` here does NOT reintroduce the window
  * FRI-2076 refused it over. A Builder can write arbitrary refs into its own
- * staging repo, which nothing prunes, nothing else reads, and — until slice 3's
- * `post-receive` — nothing forwards. The ref gate still belongs in `update`
- * (the only hook where rejection exists); it is simply not what makes this
- * safe to serve.
+ * staging repo, which nothing prunes and nothing else reads. What may then
+ * LEAVE staging is decided twice over: the generated `update` hook refuses
+ * every ref but the Builder's own branch, and `forwardStagedRef` only ever
+ * forwards that one ref by name.
  */
 
 /** Everything a worker's git client talks to lives under here. */
@@ -152,7 +153,7 @@ export async function handleWorkerGit(ctx: {
   const verb = gitVerbFor(path);
   if (!verb) {
     // 404 rather than 403, matching the worker listener: a verb we do not
-    // serve should look absent. `git-receive-pack` lands here until FRI-2077.
+    // serve should look absent.
     writeJson(res, 404, { error: "not found" });
     return;
   }
@@ -309,7 +310,7 @@ export async function handleWorkerGit(ctx: {
     if (!headersSent) writeJson(res, 500, { error: "git-http-backend failed to start" });
     else res.end();
   });
-  child.on("close", (code) => {
+  child.on("close", async (code) => {
     if (cgiError) {
       logger.log("warn", "worker.git.backend.status", {
         agent: identity.callerName,
@@ -342,6 +343,33 @@ export async function handleWorkerGit(ctx: {
       });
     }
     res.end();
+
+    // FRI-2077 slice 3: the push landed in staging behind the `update` gate;
+    // carry it the rest of the way. Only for the receive-pack verb — the
+    // advertisement changes nothing — and only after a clean exit, which is
+    // when the refs are updated and the objects are permanent.
+    //
+    // Deliberately AFTER `res.end()`: the response is git's, not the
+    // forward's, and `post-receive` (which could have spoken to the client)
+    // cannot hold the credential. See `forwardStagedRef`'s header. It never
+    // throws, so the `void` is safe — but catch anyway, because an unhandled
+    // rejection here would take the daemon down for a failed `git push`.
+    if (verb === "git-receive-pack" && code === 0) {
+      // Same derivation `githubContextFor` uses, rather than a new registry
+      // accessor for one caller.
+      const agent = await registry.getAgent(identity.callerName);
+      const branch = agent && "branch" in agent ? agent.branch : undefined;
+      if (!branch) {
+        logger.log("warn", "worker.git.forward.no-branch", { agent: identity.callerName });
+        return;
+      }
+      void forwardStagedRef({ agentName: identity.callerName, repo, branch }).catch((err) => {
+        logger.log("error", "worker.git.forward.unexpected", {
+          agent: identity.callerName,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
   });
 
   // Streamed, not buffered, and with no CONTENT_LENGTH. CGI normally passes
