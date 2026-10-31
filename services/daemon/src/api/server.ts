@@ -183,6 +183,7 @@ import {
   workerFromRequest,
   WORKER_FACING_ROUTES,
 } from "./worker-listener.js";
+import { attachEgressProxy } from "./worker-egress.js";
 import { attachWorkerChannel } from "./worker-channel.js";
 import { handleWorkerGit } from "./worker-git.js";
 import {
@@ -226,6 +227,11 @@ export function startServer(opts: StartServerOptions) {
     // token the routes above require; an unexpected channel is closed by
     // `acceptChannel` rather than left open.
     attachWorkerChannel(workerServer, acceptChannel);
+    // FRI-2039: the one allowlisted hole in a builder's otherwise routeless
+    // network. On this listener only — a loopback daemon that opens arbitrary
+    // outbound connections is an SSRF primitive for everything else on the
+    // host. See `worker-egress.ts`.
+    attachEgressProxy(workerServer);
     workerServer.listen(workerListen.port, workerListen.host);
     logger.log("warn", "api.worker-listening", {
       host: workerListen.host,

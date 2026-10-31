@@ -49,8 +49,28 @@ export const DEFAULT_EGRESS_ALLOWLIST: readonly string[] = [
   "registry.yarnpkg.com",
 ] as const;
 
-/** Only 443. See `checkDestination`. */
-export const ALLOWED_EGRESS_PORT = 443;
+/** Only 443, unless an operator says otherwise. See `resolveEgressPort`. */
+export const DEFAULT_EGRESS_PORT = 443;
+
+/**
+ * The one port CONNECT will proxy.
+ *
+ * Overridable because otherwise the SUCCESS path is untestable: 443 needs root
+ * to bind, so a test can only ever observe refusals, and a proxy that refused
+ * everything would pass a suite made entirely of refusal cases. The default is
+ * pinned by its own test.
+ *
+ * Widening this is an operator action, like the allowlist itself — the trust
+ * boundary here is the builder, not the person configuring the Deployment. It
+ * stays ONE port either way, so a permitted host never becomes a permitted
+ * `:22` as well.
+ */
+export function resolveEgressPort(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.FRIDAY_EGRESS_PORT?.trim();
+  if (!raw) return DEFAULT_EGRESS_PORT;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : DEFAULT_EGRESS_PORT;
+}
 
 /**
  * The allowlist in force, newline/comma separated from the environment.
@@ -144,7 +164,7 @@ export type DestinationVerdict =
  *
  * Three refusals, each closing a different way round the hostname allowlist:
  *
- * - **A port other than 443.** Deny-by-default means the hole is one protocol
+ * - **A port other than `allowedPort`.** Deny-by-default means the hole is one protocol
  *   wide. Plain HTTP is not proxied at all, so a build that needs it fails
  *   closed rather than getting an unencrypted channel out; and without this a
  *   permitted hostname would also be a permitted `:22` or `:5432`.
@@ -153,7 +173,11 @@ export type DestinationVerdict =
  *   DNS resolution at all.
  * - **A name not on the list.** The default.
  */
-export function checkDestination(raw: string, allow: readonly string[]): DestinationVerdict {
+export function checkDestination(
+  raw: string,
+  allow: readonly string[],
+  allowedPort: number = DEFAULT_EGRESS_PORT,
+): DestinationVerdict {
   const target = raw.trim();
   // Split on the LAST colon so a bracketed IPv6 literal does not parse as a
   // host with a port made of its own hextets.
@@ -164,8 +188,8 @@ export function checkDestination(raw: string, allow: readonly string[]): Destina
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     return { ok: false, reason: "destination port is not a port" };
   }
-  if (port !== ALLOWED_EGRESS_PORT) {
-    return { ok: false, reason: `only port ${ALLOWED_EGRESS_PORT} is proxied` };
+  if (port !== allowedPort) {
+    return { ok: false, reason: `only port ${allowedPort} is proxied` };
   }
   // `[::1]:443` — strip the brackets before asking whether it is a literal.
   const host = rawHost.replace(/^\[(.+)\]$/, "$1").toLowerCase();
