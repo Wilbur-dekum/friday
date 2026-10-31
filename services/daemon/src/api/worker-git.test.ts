@@ -330,6 +330,27 @@ describe("a Builder pushes its branch back (FRI-2077)", () => {
     expect((await refs(token, "git-receive-pack")).status).toBe(404);
   });
 
+  it("forwards the branch on to the source repo after the push (slice 3)", async () => {
+    // The whole chain in one test: clone from the daemon, commit, push through
+    // the route, and the branch arrives in the real repo — carried by the
+    // daemon, with no credential ever in the client.
+    const token = await builderWithRepo("builder-1", repo);
+    workspaceMod.ensureStagingRepo({ name: "builder-1", repo, branch: "friday/builder-1" });
+
+    const { sha } = await cloneCommitPush(token, "builder-1");
+
+    // The forward runs AFTER the response is sent (see `forwardStagedRef`), so
+    // the push returning is not the signal — poll for the ref.
+    const deadline = Date.now() + 15_000;
+    let landed: string | null = null;
+    while (Date.now() < deadline) {
+      landed = refSha(join(repo, ".git"), "refs/heads/friday/builder-1");
+      if (landed) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(landed).toBe(sha);
+  });
+
   it("gives each Builder its own staging repo", async () => {
     // Two Builders off the same source repo must not share a push target,
     // or one could overwrite the other's branch.
