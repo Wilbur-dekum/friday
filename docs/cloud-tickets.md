@@ -1318,7 +1318,7 @@ there is nothing to orchestrate the upgrade of.
 
 ## FRI-2068 — E6: Cleanup and backlog
 
-`epic` · 9 tasks
+`epic` · 10 tasks
 
 The holding epic for work that is real but blocks no other epic.
 
@@ -1332,15 +1332,54 @@ by it. A ticket that is merely LOW PRIORITY but does block an epic task stays
 with that epic — priority and blocking are different axes, and only blocking
 decides placement.
 
-### FRI-2081 — Playwright round-trip fails; the job is parked
+### FRI-2082 — `sync harness` e2e dies on EADDRINUSE from a leaked zero-cache worker
+
+`bug` · parent FRI-2068
+
+`daemon-down.e2e.test.ts` fails in `beforeAll` with
+`zero subprocess exited (code=0) before binding :<base>`, while zero-cache's
+own log shows its change-streamer worker exiting on
+`EADDRINUSE :::<base+1>`. Intermittent — red on `main`, green on the #41
+branch in the same window.
+
+The mechanism is already named in `spawnZeroCacheForTest`'s own comment, which
+is why `detached: true` is set there: _"workers leak between tests and the next
+harness boot hits EADDRINUSE on the previously-allocated port."_ The group
+SIGTERM is supposed to reap them and usually does; `sigtermThenSigkill` can
+still return on its `ms + 8_000` hard deadline with the child alive, and a
+worker that re-forks during teardown binds `base+1` after the reservation
+probe has already released it.
+
+**Two tempting explanations are wrong — measured, so they do not get
+re-litigated.** (1) The reservation probes `127.0.0.1` while zero-cache binds
+`::`; on darwin a loopback probe is indeed blind to a wildcard bind, but **on
+Linux it correctly refuses**, and CI is Linux. (2) `listen(0)` draws from the
+ephemeral range (32768–60999 on the runner, and the observed ports sit inside
+it), so a released port could be stolen as an outbound connection's local
+port — but on Linux an outbound socket holding a port **does not** block a
+later wildcard `listen` on it.
+
+So this is process lifetime, not port arithmetic. `freeSyncPorts` already
+closed the self-collision hole and cannot close this one: no probe can see a
+socket that does not exist yet.
+
+Fix direction: treat "exited before binding" as retryable at the env level —
+respawn zero-cache on fresh ports a bounded number of times — rather than
+throwing out of `beforeAll`. Note the existing retry in `waitForBoot` does not
+cover it: that branch handles a TCP _timeout_, while this child exits outright,
+which throws immediately. Verify against CI, not locally; it has not been
+reproduced on a developer machine.
+
+### FRI-2081 — Playwright round-trip fails
 
 `bug` · parent FRI-2068
 
 `live-typing.spec.ts` fails the user-visible round-trip: a sent message lands
-0 rows in `blocks` where it expects 1. Parked in CI on 2026-10-30
-(`if: ${{ false && … }}` on the `playwright` job) rather than fixed, because
-CI had not run at all since 2026-10-15 and nobody has diagnosed it — a
-permanently-red required check trains people to ignore the board.
+0 rows in `blocks` where it expects 1. It was parked in CI on 2026-10-30
+(`if: ${{ false && … }}` on the `playwright` job) because CI had not run at
+all since 2026-10-15 and nobody had diagnosed it — a permanently-red required
+check trains people to ignore the board. **The job is live again and still
+failing**, so the park is history, not current state.
 
 **DIAGNOSED (2026-10-30), and it is not the write path.** The test's own
 diagnostics had the answer: the bubble rendered, and the only recorded network
