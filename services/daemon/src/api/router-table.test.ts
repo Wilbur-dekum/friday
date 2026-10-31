@@ -48,12 +48,14 @@ const GOLDEN: string[] = [
   // PR, never merge" stops being a prompt rule.
   "POST /api/github/pr",
   "GET /api/github/pr-checks",
-  // FRI-2076: the Builder's repo, served to its container. The repository is
-  // NOT a path parameter — it is resolved from the per-worker token — so these
-  // are two fixed verbs, not a prefix match. `git-receive-pack` is absent on
-  // purpose: push is FRI-2077, where the ref gate lives.
+  // FRI-2076/FRI-2077: the Builder's repo, served to its container. The
+  // repository is NOT a path parameter — it is resolved from the per-worker
+  // token — so these are three fixed verbs, not a prefix match. The fetch
+  // verbs are served from the repo the Builder was cut from; `git-receive-pack`
+  // from its per-task staging repo, which nothing prunes.
   "GET /api/worker/git/info/refs",
   "POST /api/worker/git/git-upload-pack",
+  "POST /api/worker/git/git-receive-pack",
   "POST /api/elicitation/wait",
   "POST fn:predicate",
   "POST /api/internal/cancel-queued",
@@ -174,6 +176,7 @@ const GOLDEN_RAW: string[] = [
   // git-http-backend's stdout — nothing about it survives a JSON envelope.
   "GET /api/worker/git/info/refs",
   "POST /api/worker/git/git-upload-pack",
+  "POST /api/worker/git/git-receive-pack",
 ];
 
 describe("ROUTES contract", () => {
@@ -191,7 +194,7 @@ describe("ROUTES contract", () => {
     const added = [...actual].filter((k) => !golden.has(k));
     expect({ dropped, added }).toEqual({ dropped: [], added: [] });
     expect(ROUTES.length).toBe(GOLDEN.length);
-    expect(ROUTES.length).toBe(88);
+    expect(ROUTES.length).toBe(89);
   });
 
   it("orders every specific route before the broad regex that would swallow it", () => {
@@ -225,7 +228,7 @@ describe("ROUTES contract", () => {
     expect(gated.size).toBe(22);
   });
 
-  it("marks EXACTLY the 8 streaming/binary/seam routes as raw (owns req/res)", () => {
+  it("marks EXACTLY the 9 streaming/binary/seam routes as raw (owns req/res)", () => {
     const raw = new Set(ROUTES.filter((r) => r.raw != null).map(rowKey));
     expect([...raw].sort()).toEqual([...GOLDEN_RAW].sort());
     // raw rows own the response: they carry no JSON handler/schema.

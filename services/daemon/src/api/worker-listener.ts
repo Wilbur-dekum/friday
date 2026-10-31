@@ -68,7 +68,14 @@ export const WORKER_FACING_ROUTES: readonly WorkerRoute[] = [
   {
     method: "POST",
     match: (p) => p === "/api/worker/git/git-upload-pack",
-    reason: "FRI-2076: the fetch half of that clone. No receive-pack — push is FRI-2077",
+    reason: "FRI-2076: the fetch half of that clone",
+  },
+  {
+    method: "POST",
+    match: (p) => p === "/api/worker/git/git-receive-pack",
+    reason:
+      "FRI-2077: the Builder pushes its branch back. Served from the per-task " +
+      "staging repo, never the mirror — the mirror's --prune refresh eats un-forwarded refs",
   },
   {
     method: "POST",

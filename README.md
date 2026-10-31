@@ -321,6 +321,7 @@ Operational files live at `~/.friday/`. Canonical state (blocks, mail, tickets, 
 ├── agents/<name>/                 Per-agent home (orchestrator/helper/scheduled cwd; ADR-029)
 ├── apps/<id>/                     Installed Friday Apps (ADR-021)
 ├── workspaces/<name>/             Builder git worktrees
+├── staging/<name>.git/            Push target for a containerised Builder (FRI-2077)
 ├── evolve/                        Evolve proposals + dream-diary.md (nightly memory-dreaming journal; ADR-046)
 ├── models/                        ONNX embedding-model cache (all-MiniLM-L6-v2; FRI-24)
 └── logs/*.jsonl                   Structured logs, rotated at 1 MiB

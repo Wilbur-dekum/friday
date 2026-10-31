@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer, type Server } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -86,6 +86,10 @@ afterEach(async () => {
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   rmSync(scratch, { recursive: true, force: true });
+  // Staging repos live under DATA_DIR, which is shared across this file's
+  // tests — leaving one behind makes the "no staging repo" case pass for the
+  // wrong reason.
+  rmSync(workspaceMod.stagingRoot(), { recursive: true, force: true });
   tokens.__resetWorkerTokensForTest();
   delete process.env.FRIDAY_REPO_ALLOWLIST;
 });
@@ -193,11 +197,11 @@ describe("when git-http-backend itself fails", () => {
 });
 
 describe("what a worker may ask for", () => {
-  it("serves exactly two verbs and treats everything else as absent", () => {
+  it("serves exactly three verbs and treats everything else as absent", () => {
     expect(gitVerbFor("/api/worker/git/info/refs")).toBe("info/refs");
     expect(gitVerbFor("/api/worker/git/git-upload-pack")).toBe("git-upload-pack");
-    // Push, which FRI-2077 adds together with the ref gate that makes it safe.
-    expect(gitVerbFor("/api/worker/git/git-receive-pack")).toBeNull();
+    // FRI-2077: push, served from the staging repo rather than the mirror.
+    expect(gitVerbFor("/api/worker/git/git-receive-pack")).toBe("git-receive-pack");
     // Traversal has nothing to reach — the repo is not in the URL — but the
     // allowlist refuses the attempt regardless.
     expect(gitVerbFor("/api/worker/git/../../etc/passwd")).toBeNull();
@@ -205,18 +209,23 @@ describe("what a worker may ask for", () => {
     expect(gitVerbFor("/api/worker/other")).toBeNull();
   });
 
-  it("refuses the PUSH advertisement even though the verb is allowed", async () => {
-    // `info/refs?service=git-receive-pack` is a client asking "what may I push
-    // to". Answering it would advertise a capability that does not exist yet.
+  it("refuses a service that is neither of git's two", async () => {
+    // The verb set is the whole surface: an unknown `service` is answered here
+    // rather than handed to the backend to interpret.
     const token = await builderWithRepo("builder-1", repo);
-    const res = await refs(token, "git-receive-pack");
+    const res = await refs(token, "git-evil-pack");
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toMatch(/push is not enabled/);
   });
+});
 
-  it("refuses an actual push", async () => {
-    const token = await builderWithRepo("builder-1", repo);
-    const dest = join(scratch, "clone-push");
+describe("a Builder pushes its branch back (FRI-2077)", () => {
+  /** Clone, commit, and push `ref` — the round trip a Builder actually makes. */
+  async function cloneCommitPush(
+    token: string,
+    name: string,
+    ref = `refs/heads/friday/${name}`,
+  ): Promise<{ dest: string; sha: string }> {
+    const dest = join(scratch, `clone-${name}-${ref.replace(/\W/g, "_")}`);
     await cloneAs(token, dest);
     // Local-only git ops stay sync: nothing is waiting on the event loop.
     const g = (...a: string[]) => execFileSync("git", a, { cwd: dest, stdio: "pipe" });
@@ -225,20 +234,145 @@ describe("what a worker may ask for", () => {
     writeFileSync(join(dest, "new.txt"), "x\n");
     g("add", ".");
     g("commit", "-qm", "work");
-    await expect(
-      run(
-        "git",
-        [
-          "-c",
-          `http.extraHeader=Authorization: Bearer ${token}`,
-          "push",
-          "-q",
-          "origin",
-          "HEAD:refs/heads/friday/builder-1",
-        ],
-        { cwd: dest, timeout: 30_000 },
-      ),
-    ).rejects.toThrow();
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dest,
+      encoding: "utf8",
+    }).trim();
+    await run(
+      "git",
+      [
+        "-c",
+        `http.extraHeader=Authorization: Bearer ${token}`,
+        "push",
+        "-q",
+        "origin",
+        `HEAD:${ref}`,
+      ],
+      { cwd: dest, timeout: 30_000 },
+    );
+    return { dest, sha };
+  }
+
+  /** What `ref` points at in `gitDir`, or null when it is absent. */
+  function refSha(gitDir: string, ref: string): string | null {
+    try {
+      return execFileSync("git", ["--git-dir", gitDir, "rev-parse", "--verify", ref], {
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      }).trim();
+    } catch {
+      return null;
+    }
+  }
+
+  it("accepts the push, and the ref lands in STAGING — not in the source repo", async () => {
+    // The ticket, end to end. Where the ref lands is the whole point: the
+    // mirror's `--prune` refresh would eat it, and a local-path repo is the
+    // user's own checkout.
+    const token = await builderWithRepo("builder-1", repo);
+    const staging = workspaceMod.ensureStagingRepo({
+      name: "builder-1",
+      repo,
+      branch: "friday/builder-1",
+    });
+
+    const { sha } = await cloneCommitPush(token, "builder-1");
+
+    expect(refSha(staging, "refs/heads/friday/builder-1")).toBe(sha);
+    // The source repo is untouched — no Builder ref appears in the daily
+    // driver's own checkout.
+    expect(refSha(join(repo, ".git"), "refs/heads/friday/builder-1")).toBeNull();
+  });
+
+  it("answers the push advertisement from staging, so the delta is computed against it", async () => {
+    // If the advertisement described the source repo instead, the client would
+    // compute its delta against refs the push target does not have.
+    const token = await builderWithRepo("builder-1", repo);
+    workspaceMod.ensureStagingRepo({ name: "builder-1", repo, branch: "friday/builder-1" });
+    expect((await refs(token, "git-receive-pack")).status).toBe(200);
+  });
+
+  it("seeds staging from the base ref, so the first push is a delta", async () => {
+    // An unseeded staging repo shares no objects with the clone, so the push
+    // would carry the whole history back over the loopback.
+    const base = refSha(join(repo, ".git"), "refs/heads/main");
+    const staging = workspaceMod.ensureStagingRepo({
+      name: "builder-1",
+      repo,
+      branch: "friday/builder-1",
+    });
+    expect(refSha(staging, "refs/heads/friday/builder-1")).toBe(base);
+  });
+
+  it("404s a push when the Builder has no staging repo", async () => {
+    // Nothing created one, so there is nothing to receive — and the handler
+    // must not fall back to the source repo.
+    const token = await builderWithRepo("builder-1", repo);
+    expect((await refs(token, "git-receive-pack")).status).toBe(404);
+  });
+
+  it("refuses a push once the repo falls off the allowlist", async () => {
+    // The staging repo is the Builder's own and would be harmless to write,
+    // but a revoked repo must stop the write half too, not just the read.
+    const token = await builderWithRepo("builder-1", repo);
+    workspaceMod.ensureStagingRepo({ name: "builder-1", repo, branch: "friday/builder-1" });
+    expect((await refs(token, "git-receive-pack")).status).toBe(200);
+
+    process.env.FRIDAY_REPO_ALLOWLIST = "https://github.com/acme/something-else";
+    expect((await refs(token, "git-receive-pack")).status).toBe(404);
+  });
+
+  it("gives each Builder its own staging repo", async () => {
+    // Two Builders off the same source repo must not share a push target,
+    // or one could overwrite the other's branch.
+    const a = workspaceMod.ensureStagingRepo({
+      name: "builder-1",
+      repo,
+      branch: "friday/builder-1",
+    });
+    const b = workspaceMod.ensureStagingRepo({
+      name: "builder-2",
+      repo,
+      branch: "friday/builder-2",
+    });
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("the staging repo's own lifecycle", () => {
+  it("refuses a name that would escape the staging root", () => {
+    // `name` comes from the registry rather than a URL, but it is interpolated
+    // into a filesystem path, so separators are refused outright.
+    expect(() => workspaceMod.stagingPathForAgent("../../etc/passwd")).toThrow(
+      /invalid agent name/,
+    );
+    expect(() => workspaceMod.stagingPathForAgent("..")).toThrow(/invalid agent name/);
+    expect(() => workspaceMod.stagingPathForAgent("")).toThrow(/invalid agent name/);
+  });
+
+  it("removes the staging repo, and is a no-op when there is none", () => {
+    const staging = workspaceMod.ensureStagingRepo({
+      name: "builder-1",
+      repo,
+      branch: "friday/builder-1",
+    });
+    expect(existsSync(staging)).toBe(true);
+    workspaceMod.removeStagingRepo("builder-1");
+    expect(existsSync(staging)).toBe(false);
+    // Idempotent: archive can run twice, and a daemon-owned Builder never had one.
+    expect(() => workspaceMod.removeStagingRepo("builder-1")).not.toThrow();
+  });
+
+  it("survives a source repo with no upstream main, without failing the spawn", () => {
+    // The seed is an optimization. A repo whose `origin/main` does not exist
+    // must still get a usable push target.
+    const bare = seedRepo(join(scratch, "no-origin"));
+    const staging = workspaceMod.ensureStagingRepo({
+      name: "builder-3",
+      repo: bare,
+      branch: "friday/builder-3",
+    });
+    expect(existsSync(staging)).toBe(true);
   });
 });
 
