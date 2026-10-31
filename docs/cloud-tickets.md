@@ -1045,49 +1045,78 @@ worker-facing route, so it belongs in `WORKER_FACING_ROUTES` with its reason.
 
 `task` · parent FRI-2036 · ADR-054
 
-With FRI-2076 the clone's `origin` is the daemon, so `git push` lands in the
-daemon's `gitDir` and something has to carry it the rest of the way. Good: the
-GitHub credential then lives in the trusted tier and never enters the process
-running untrusted repository code. For a local-path repo nothing changes at all
-— a Builder's push already rides the daemon machine's git config today, because
-its worktree shares the daemon's origin.
+With FRI-2076 the clone's `origin` is the daemon, so `git push` lands on the
+daemon and something has to carry it the rest of the way. The upside is the
+point of the whole arrangement: the GitHub credential lives in the trusted tier
+and never enters the process running untrusted repository code.
+
+**Where the push lands was the decision, not how to serve `receive-pack`.**
+Neither end of `resolveRepoGitDir` can receive one. `ensureMirror` refreshes
+with `git remote update --prune` and a `--mirror` clone's refspec is
+`+refs/*:refs/*`, so a Builder branch sitting there un-forwarded is pruned by
+the next `createWorkspace` against that mirror. The obvious escape does not
+work — measured: refs parked in `refs/friday-pending/*` were pruned exactly
+like ones in `refs/heads/*`, because that refspec covers every namespace.
+Nothing under `refs/` survives. And a local-path repo **is** the user's own
+checkout, which `worktree.repo` defaults to, so landing pushes there writes
+Builder refs into the daily driver.
+
+So each task gets a bare repo nothing prunes and nothing else reads:
+`<DATA_DIR>/staging/<name>.git`, the per-task shape FRI-2038 already uses for
+volumes, applied to refs. A mirror is by definition a copy of upstream, so
+holding state that exists only locally in one is wrong regardless of ordering.
 
 **A `post-receive` hook cannot reject a push — measured.** Its stderr reaches
 the client as `remote:` text, but the push still reports `* [new branch]` and
-the ref lands; only `update` / `pre-receive` can refuse (verified: `!
-[remote rejected] (hook declined)`). So the two halves split: the GATE goes in
-`update`, which is the only place rejection exists, and the FORWARD goes in
-`post-receive`, which is the only place the objects are permanent — in
-`pre-receive` they are still quarantined.
+the ref lands; only `update` / `pre-receive` can refuse (verified:
+`! [remote rejected] (hook declined)`). So the gate goes in `update`, the only
+place rejection exists: a generated hook allowing exactly the Builder's own
+`refs/heads/friday/<agent>` and refusing everything else. That is a code gate —
+testable, logged, attributable to a User per ADR-051/ADR-053 — replacing a
+prompt rule that merely asked a Builder not to push to `main`. It is
+daemon-side code Friday authors, unrelated to FRI-2042's deny-list, which is
+about hooks inside the container's clone.
 
-The gate is: **only refs matching the Builder's own `friday/<agent>` branch may
-be forwarded.** That is a code gate — testable, logged, attributable to a User per
-ADR-051/ADR-053 — replacing a prompt rule that currently asks a Builder not to
-push to `main`. Note this hook is daemon-side code we own and is unrelated to
-FRI-2042's deny-list, which is about hooks inside the _container's_ clone.
+Two details carry the gate. The allowed ref is **baked in at spawn**, not read
+from `REMOTE_USER`, which is set from the request — a gate that trusts its
+caller is not a gate. And the hook is **chmod 0755**: git ignores a
+non-executable hook _silently_, so without it the push is simply accepted with
+no error anywhere.
 
-\*\*`http.receivepack=true` is required or `git-http-backend` answers 403 — but it
-does NOT need writing into the user's repo: `GIT_CONFIG_COUNT=1
-GIT_CONFIG_KEY_0=http.receivepack GIT_CONFIG_VALUE_0=true` injects it
-per-request, verified, leaving the repo's own config untouched.
+**The forward runs in-process after `git-http-backend` exits cleanly, not in a
+`post-receive` hook.** The ticket originally reasoned for `post-receive` because
+it is the only hook where the objects are permanent rather than quarantined.
+That constraint is about hook timing and is satisfied in-process too, and
+running there keeps the token out of a file on disk: a hook that pushed would
+need the credential in its own environment or embedded in its text. The cost,
+stated plainly — `post-receive`'s stderr reaches the client and this does not,
+so a Builder sees `* [new branch]` and learns nothing about whether the branch
+reached GitHub. It finds out when `friday-github` (FRI-2078) opens the PR.
 
-The hazard to design around, because it loses work silently:** `ensureMirror`
-refreshes with `git remote update --prune`, and a `--mirror` clone's refspec is
-`+refs/*:refs/*`. A Builder branch sitting in the mirror but not yet forwarded
-to GitHub **is pruned** by the next `createWorkspace` against that mirror.
-**The obvious escape does not work — measured.\*_ A `--mirror` clone's refspec
-is `+refs/_:refs/_`, which covers every namespace: refs placed in
-`refs/friday-pending/_`were pruned exactly like ones in`refs/heads/\*`.
-Nothing under `refs/` survives.
+**A clean backend exit does not mean a ref landed — measured.** The `update`
+hook's rejection travels in the response body, not the exit status, so
+`code === 0` is true for a push where every ref was refused. Since
+`ensureStagingRepo` seeds `refs/heads/<branch>` from the base ref (so the first
+push is a delta rather than the whole history over loopback), staging holds the
+Builder's branch at the base commit from the moment it exists — and forwarding
+on exit status alone made that seed appear at the destination as the Builder's
+branch, carrying none of its work, on the first push a Builder made including
+one the gate refused. The forward is therefore gated on the staged heads
+actually having moved, snapshotted before the backend runs.
 
-Which exposes the real question. A mirror is BY DEFINITION a copy of
-upstream, so any state that exists only locally is transient by construction,
-and once the ref goes the objects are unreachable and gc-able. Holding a
-Builder's un-pushed work there is wrong regardless of ordering. The options
-are therefore: forward synchronously so nothing local has to survive; narrow
-the mirror's refspec so it stops being a mirror; or land incoming pushes in a
-per-assignment staging repo the daemon never prunes — the same per-task shape
-FRI-2038 already uses for volumes. Decide this before writing code.
+**`http.receivepack=true` is required or `git-http-backend` answers 403** — but
+it does not need writing into the served repo: `GIT_CONFIG_COUNT=1`
+`GIT_CONFIG_KEY_0=http.receivepack` `GIT_CONFIG_VALUE_0=true` injects it
+per-request, verified, leaving the repo's own config untouched. It is absent on
+the read path, so a fetch cannot accidentally advertise a writable repo.
+
+A failed forward is not lost work: nothing prunes staging, so a ref that could
+not be forwarded is still there to retry, which is the entire reason pushes land
+there rather than in the `--prune`-refreshed mirror.
+
+**Test trap, inherited from FRI-2076:** every git invocation that talks to an
+in-process server must be async. `execFileSync` blocks the event loop and the
+resulting deadlock reads exactly like a hung handler.
 
 ### FRI-2078 — Host PR creation and CI checks daemon-side
 
