@@ -29,6 +29,7 @@ async function loadBroker(env: Record<string, string> = {}) {
   return (await import("../../../builder-broker/broker.mjs")) as {
     buildContainerSpec: (taskId: string, env?: Record<string, string>) => Record<string, never>;
     clampGrace: (raw: unknown) => number;
+    egressNoProxy: (proxyUrl: string) => string;
   };
 }
 
@@ -132,5 +133,92 @@ describe("teardown grace period", () => {
     // would let one request hold a privileged process for as long as it likes.
     expect(clampGrace("99999")).toBe(30);
     expect(clampGrace("-5")).toBe(0);
+  });
+});
+
+describe("egress (FRI-2039)", () => {
+  /** The Env array the spec carries, as a lookup. */
+  function envOf(spec: Record<string, never>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const entry of (spec as unknown as { Env: string[] }).Env) {
+      const i = entry.indexOf("=");
+      out[entry.slice(0, i)] = entry.slice(i + 1);
+    }
+    return out;
+  }
+
+  it("joins the network broker config names, never one the caller picks", async () => {
+    // The internal network IS the deny half of deny-by-default. A caller able
+    // to choose it could ask for one with a route to the internet.
+    const build = await loadSpecBuilder({ BROKER_BUILDER_NETWORK: "friday_builders" });
+    const spec = build("task-1", { NetworkMode: "bridge" } as never);
+    expect(
+      (spec as unknown as { HostConfig: { NetworkMode: string } }).HostConfig.NetworkMode,
+    ).toBe("friday_builders");
+  });
+
+  it("injects the proxy the OPERATOR configured", async () => {
+    const build = await loadSpecBuilder({ BROKER_EGRESS_PROXY: "http://friday:7611" });
+    const env = envOf(build("task-1", {}));
+    // Both spellings: tools disagree on case.
+    expect(env.HTTPS_PROXY).toBe("http://friday:7611");
+    expect(env.https_proxy).toBe("http://friday:7611");
+    expect(env.HTTP_PROXY).toBe("http://friday:7611");
+    expect(env.http_proxy).toBe("http://friday:7611");
+  });
+
+  it("a caller cannot supply its own proxy", async () => {
+    // The whole control is that the daemon decides destinations. A builder
+    // pointed at a proxy of its own choosing has no control at all.
+    const build = await loadSpecBuilder({ BROKER_EGRESS_PROXY: "http://friday:7611" });
+    const env = envOf(
+      build("task-1", {
+        HTTPS_PROXY: "http://evil.example:8080",
+        https_proxy: "http://evil.example:8080",
+        NO_PROXY: "*",
+      } as never),
+    );
+    expect(env.HTTPS_PROXY).toBe("http://friday:7611");
+    expect(env.NO_PROXY).not.toBe("*");
+  });
+
+  it("a caller cannot UNSET the proxy to try its luck directly", async () => {
+    // Belt and braces: on an internal network there is nowhere to go without
+    // the proxy, but the env must not be the caller's to clear either.
+    const build = await loadSpecBuilder({ BROKER_EGRESS_PROXY: "http://friday:7611" });
+    const env = envOf(build("task-1", { HTTPS_PROXY: "" } as never));
+    expect(env.HTTPS_PROXY).toBe("http://friday:7611");
+  });
+
+  it("offers no proxy at all when the operator configured none", async () => {
+    // On an internal network that is egress fully closed, which is a valid
+    // and safe configuration — not a broken one.
+    //
+    // Deleted rather than passed empty: `loadBroker` writes its argument into
+    // `process.env` and does not clear it afterwards, so a value set by an
+    // earlier case is still there and "unset" has to be made unset.
+    delete process.env.BROKER_EGRESS_PROXY;
+    const build = await loadSpecBuilder({});
+    const env = envOf(build("task-1", {}));
+    expect(env.HTTPS_PROXY).toBeUndefined();
+    expect(env.NO_PROXY).toBeUndefined();
+  });
+
+  it("exempts the daemon's own host from the proxy", async () => {
+    // The proxy host IS the daemon: the worker's API calls, git route and
+    // command channel all go there. Routing them through CONNECT would refuse
+    // them — not on the allowlist, and not port 443.
+    const build = await loadSpecBuilder({ BROKER_EGRESS_PROXY: "http://friday:7611" });
+    const env = envOf(build("task-1", {}));
+    expect(env.NO_PROXY.split(",")).toContain("friday");
+    expect(env.no_proxy.split(",")).toContain("friday");
+  });
+
+  it("derives NO_PROXY from the proxy URL rather than a second setting", async () => {
+    const { egressNoProxy } = await loadBroker({});
+    expect(egressNoProxy("http://daemon.internal:7611").split(",")).toContain("daemon.internal");
+    // A malformed URL still yields something safe rather than throwing out of
+    // container creation.
+    expect(egressNoProxy("not-a-url")).toBe("localhost,127.0.0.1");
   });
 });

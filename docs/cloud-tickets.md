@@ -746,7 +746,7 @@ become cgroups instead of Darwin-honoured `ulimit`s.
 
 ### FRI-2039 — Egress deny-by-default
 
-`task` · parent FRI-2036 · ADR-054
+`task` · parent FRI-2036 · ADR-054 · **done**
 
 Allowlist the git host and package registries, nothing else — this removes the
 payoff from most supply-chain compromises: a malicious postinstall can run, but
@@ -754,6 +754,60 @@ cannot exfiltrate or phone home. **Verify the allowlist is destination-based and
 denies link-local**, because the cloud metadata endpoint (`169.254.169.254`) is an
 _account_-level compromise rather than a Deployment-level one: steal the host's
 IAM credentials and the blast radius is the whole cloud account. Launch gate.
+
+**The allowlist came out smaller than this ticket assumed.** The git host is
+not on it: FRI-2076/2077 put git behind the daemon's own route and FRI-2078 did
+the same for the GitHub API, so a builder reaches neither directly. What is
+irreducible is `api.anthropic.com` — the Claude SDK runs INSIDE the worker, so
+the process doing the untrusted work is also the one that must reach the model
+— plus the package registries a build installs from. A test pins the absence of
+`github.com` so it cannot drift back in.
+
+**The deny half is topology, not policy.** The builder joins a Docker network
+declared `internal: true`, which Docker gives no gateway. Measured from inside
+one: a public address and `169.254.169.254` both answer `ENETUNREACH`, and
+external names do not resolve (`EAI_AGAIN`). The metadata endpoint is therefore
+unreachable because no path to it exists — the strongest form the ticket's
+requirement can take. Container names still resolve, which is what lets the
+worker reach the daemon at all; and the builder does not need external DNS
+because the proxy resolves on its behalf, which is ordinary CONNECT semantics.
+
+Dropping `BROKER_BUILDER_NETWORK: friday_default` is most of the fix: on the
+default compose network a builder had full internet access **and** could reach
+Postgres and zero-cache directly. Putting builders on their own internal
+network also delivers most of FRI-2040 as a side effect.
+
+**The allowed hole is a CONNECT proxy on the worker-facing listener**, not a
+sidecar. Enforcement cannot live in the container — it runs `CapDrop: ALL`, so
+in-container firewall rules are unavailable and would anyway be removable by
+the code they constrain. The daemon is already on the builder network, already
+authenticates workers per-token, and already holds the routes the builder lost;
+a sidecar needs its own auth and supervision for no extra property. CONNECT
+tunnels bytes, so TLS stays end to end and the daemon never sees plaintext or
+needs a CA.
+
+**The hazard that creates, and the two things that close it.** The daemon's own
+reachability becomes the builder's ceiling, so a builder that can name a
+destination could otherwise reach the Deployment's Postgres. First, the
+allowlist denies everything not on it. Second — and this is the part a
+hostname allowlist alone gets wrong — **the socket is opened to an address that
+was checked, not to the name that was allowed.** `evil.example` can hold an A
+record pointing at the metadata endpoint, and resolving inside `connect` would
+leave a window for DNS to change the answer between the check and the
+connection. A name resolving to a MIX of allowed and blocked addresses is
+refused outright rather than filtered, because that shape is what rebinding
+looks like and filtering turns it into a retry loop.
+
+Proxy variables are injected by the BROKER from operator config, never taken
+from the caller and not in `ALLOWED_ENV` — a builder pointed at a proxy of its
+own choosing has no control at all. `NO_PROXY` is derived from the proxy URL
+rather than configured separately, because they are the same process and two
+settings that must agree are a way for them to disagree.
+
+Still open, deliberately: **plain HTTP is not proxied at all.** One port, 443.
+A build that needs `http://` fails closed rather than getting an unencrypted
+channel out. `FRIDAY_EGRESS_PORT` exists because the success path is otherwise
+untestable (443 needs root to bind) and the 443 default is pinned by a test.
 
 ### FRI-2040 — Per-Organization network isolation
 

@@ -237,15 +237,21 @@ binding beyond loopback. Doing that on the existing listener would expose all
 84 routes to the one network the untrusted-code container sits on.
 
 So there is a **second listener**, off unless `FRIDAY_WORKER_LISTEN` is set
-(e.g. `0.0.0.0:7611`). It serves only `WORKER_FACING_ROUTES` — four patterns —
-and every request needs a per-worker bearer token:
+(e.g. `0.0.0.0:7611`). It serves only `WORKER_FACING_ROUTES` and every request
+needs a per-worker bearer token:
 
-| Route                         | Why a worker needs it                            |
-| ----------------------------- | ------------------------------------------------ |
-| `POST /api/mcp/<server>`      | the hosted MCP servers its SDK connects to       |
-| `GET /api/memory`             | `compact-flush` reads the index to bound a flush |
-| `GET /api/mail/inbox/<agent>` | `fetchInboxQuiet` drains mail at turn start      |
-| `POST /api/elicitation/wait`  | the one MCP server that cannot be hosted         |
+| Route                                   | Why a worker needs it                            |
+| --------------------------------------- | ------------------------------------------------ |
+| `POST /api/mcp/<server>`                | the hosted MCP servers its SDK connects to       |
+| `GET /api/memory`                       | `compact-flush` reads the index to bound a flush |
+| `GET /api/mail/inbox/<agent>`           | `fetchInboxQuiet` drains mail at turn start      |
+| `POST /api/elicitation/wait`            | the one MCP server that cannot be hosted         |
+| `GET /api/worker/git/info/refs`         | the clone that fills `/workspace` (FRI-2076)     |
+| `POST /api/worker/git/git-upload-pack`  | the fetch half of that clone                     |
+| `POST /api/worker/git/git-receive-pack` | the push back, into a staging repo (FRI-2077)    |
+
+The same listener also answers **`CONNECT`**, which is the builder's only way
+out to the internet. See "Egress" below.
 
 The list is short because hosting thirteen of fourteen MCP servers daemon-side
 collapsed the worker→daemon surface: those handlers now self-call and never
@@ -288,14 +294,15 @@ Both are the same five capabilities behind one seam
 alive, stop it. Container mode is **opt-in by configuration, not by platform** —
 a laptop and a single-container Deployment both keep the process runtime:
 
-| Variable                      | Purpose                                                                      |
-| ----------------------------- | ---------------------------------------------------------------------------- |
-| `FRIDAY_BUILDER_BROKER_URL`   | where the broker listens, e.g. `http://builder-broker:7612`                  |
-| `FRIDAY_BUILDER_BROKER_TOKEN` | shared secret the daemon presents to it                                      |
-| `FRIDAY_DAEMON_URL`           | the daemon as the **container** sees it, e.g. `http://friday:7611`           |
-| `FRIDAY_WORKER_LISTEN`        | the worker-facing listener above — a worker with no way home cannot dial out |
+| Variable                      | Purpose                                                                        |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `FRIDAY_BUILDER_BROKER_URL`   | where the broker listens, e.g. `http://builder-broker:7612`                    |
+| `FRIDAY_BUILDER_BROKER_TOKEN` | shared secret the daemon presents to it                                        |
+| `FRIDAY_DAEMON_URL`           | the daemon as the **container** sees it, e.g. `http://friday:7611`             |
+| `FRIDAY_WORKER_LISTEN`        | the worker-facing listener above — a worker with no way home cannot dial out   |
+| `BROKER_EGRESS_PROXY`         | the daemon's CONNECT proxy as the container sees it, e.g. `http://friday:7611` |
 
-All four are required; three of them are useless alone. The broker runs under
+The first four are required; three of them are useless alone. The broker runs under
 the `builders` compose profile (`docker compose --profile builders up`).
 
 **The broker is the privileged seam.** Creating containers needs the Docker
@@ -550,6 +557,53 @@ the key count so an addition has to be argued for.
 A clone failure fails the turn with a visible reason rather than throwing: it
 runs before the turn starts, where an exception would kill the worker with
 nothing to show the user.
+
+### Egress (FRI-2039)
+
+A builder's network is **deny-by-default, structurally**: the broker attaches it
+to a Docker network declared `internal: true`, which Docker gives no gateway.
+Measured from inside one — both a public address and the cloud metadata
+endpoint answer `ENETUNREACH`, and external names do not resolve at all:
+
+```
+metadata 169.254.169.254: denied ENETUNREACH
+public 1.1.1.1:443:       denied ENETUNREACH
+dns api.anthropic.com:    denied EAI_AGAIN
+```
+
+That is the point: `169.254.169.254` is unreachable because no path to it
+exists, not because a rule remembered to say no. Container names still resolve
+on an internal network, which is what lets the worker reach `friday` at all.
+
+The one hole is a **CONNECT proxy on the worker-facing listener**. The daemon
+is already the only thing that network can see, already authenticates workers
+per-token, and already holds the git and GitHub routes — a sidecar would need
+its own auth and supervision for no extra property. CONNECT tunnels bytes, so
+TLS stays end-to-end: the daemon decides _where_ a connection may go, never
+what crosses it.
+
+| Knob                      | Meaning                                                                                                                          |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `FRIDAY_EGRESS_ALLOWLIST` | hosts a builder may reach. **Replaces** the default, so the set in force is visible in one place. `none` closes egress entirely. |
+| `FRIDAY_EGRESS_PORT`      | the single port proxied. Defaults to 443; exists so the success path is testable, since 443 needs root to bind.                  |
+
+The default list is `api.anthropic.com` plus the npm/yarn registries — and
+notably **not** a git host, because FRI-2076/2077 put git behind the daemon's
+own route and FRI-2078 did the same for the GitHub API, so a builder reaches
+neither directly.
+
+A hostname allowlist alone would not be destination-based, which is what
+ADR-054 requires: `evil.example` can hold an A record pointing at the metadata
+endpoint. So every resolved address is checked against the private, loopback,
+link-local, CGNAT and multicast ranges, **and the socket is opened to an
+address that was checked rather than to the name that was allowed** — resolving
+inside `connect` would leave a window for DNS to change the answer. A name
+resolving to a mix of allowed and blocked addresses is refused outright, since
+that shape is what rebinding looks like.
+
+Because the builder cannot resolve external names itself, it does not need to:
+the proxy resolves on its behalf, which is ordinary CONNECT semantics. A tool
+that ignores `HTTPS_PROXY` fails closed.
 
 ### Verifying it in a real container
 

@@ -181,8 +181,16 @@ entries, other agents' worktrees — and read the secrets there. One Deployment
 serves one Organization, so that is the tenant's own data, most of which the
 agent can reach through its tools anyway; the cross-tenant seam is the
 container, and that holds. Per-task builder containers (FRI-2038) are the fix
-for intra-Deployment isolation, and egress deny-by-default (FRI-2039) for the
-network, which is currently unrestricted.
+for intra-Deployment isolation.
+
+**Egress is no longer unrestricted (FRI-2039).** A builder sits on a Docker
+network declared `internal: true`, which has no gateway and therefore no route
+off itself — measured, both a public address and `169.254.169.254` answer
+`ENETUNREACH`. The single allowlisted hole is a CONNECT proxy on the daemon's
+worker-facing listener, default `api.anthropic.com` plus the package
+registries, port 443 only, with every resolved address checked against the
+private and link-local ranges and the connection opened to the checked address
+rather than the allowed name. See `docs/running.md` § Egress.
 
 The full rewrite of this document around cgroups and container lifetime is
 FRI-2043. This section is the interim honest account, not that rewrite.
