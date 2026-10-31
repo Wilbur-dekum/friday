@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger } from "../log.js";
 import { writeJson } from "./router.js";
 import { workerFromRequest } from "./worker-listener.js";
-import { resolveRepoGitDir } from "../agent/workspace.js";
+import { resolveRepoGitDir, stagingPathForAgent } from "../agent/workspace.js";
 import { isRepoAllowed, resolveRepoAllowlist } from "../agent/repo-allowlist.js";
 import * as registry from "../agent/registry.js";
 
@@ -40,30 +40,48 @@ import * as registry from "../agent/registry.js";
  * parameter to traverse out of: `GIT_PROJECT_ROOT` and `PATH_INFO` are built
  * from the resolved path, and the URL contributes only which of two verbs runs.
  *
- * Read-only. `git-receive-pack` is deliberately absent — push is FRI-2077,
- * where the ref gate lives, and until then a worker cannot write to the
- * daemon's git dir at all.
+ * ## Fetch and push do not read the same repository (FRI-2077)
+ *
+ * A fetch is served from `resolveRepoGitDir` — the mirror, or the user's own
+ * checkout. A push is served from the Builder's per-task STAGING repo, because
+ * neither of those can safely receive one: the mirror's `--prune` refresh eats
+ * un-forwarded Builder refs, and a local-path repo is the daily driver's own
+ * `.git`. See `ensureStagingRepo`.
+ *
+ * Which means allowing `git-receive-pack` here does NOT reintroduce the window
+ * FRI-2076 refused it over. A Builder can write arbitrary refs into its own
+ * staging repo, which nothing prunes, nothing else reads, and — until slice 3's
+ * `post-receive` — nothing forwards. The ref gate still belongs in `update`
+ * (the only hook where rejection exists); it is simply not what makes this
+ * safe to serve.
  */
 
 /** Everything a worker's git client talks to lives under here. */
 export const WORKER_GIT_PREFIX = "/api/worker/git/";
 
-/**
- * The two verbs a fetch needs, as an allowlist.
- *
- * `git-receive-pack` and `info/refs?service=git-receive-pack` are the push
- * side and are refused: FRI-2077 adds them together with the `post-receive`
- * gate that decides which refs may be forwarded. Allowing the transport
- * before the gate exists would mean a window where a Builder can write any
- * ref into the daemon's git dir.
- */
+/** The verbs a fetch needs. Served from the repo the Builder was cut from. */
 const READ_VERBS = new Set(["info/refs", "git-upload-pack"]);
+
+/** The verb a push needs. Served from the Builder's staging repo, never the mirror. */
+const WRITE_VERBS = new Set(["git-receive-pack"]);
 
 /** The verb a request names, or null when it is not one we serve. */
 export function gitVerbFor(path: string): string | null {
   if (!path.startsWith(WORKER_GIT_PREFIX)) return null;
   const verb = path.slice(WORKER_GIT_PREFIX.length);
-  return READ_VERBS.has(verb) ? verb : null;
+  return READ_VERBS.has(verb) || WRITE_VERBS.has(verb) ? verb : null;
+}
+
+/**
+ * Whether this request is the push side.
+ *
+ * Two spellings reach the same answer: the `git-receive-pack` verb itself, and
+ * `info/refs?service=git-receive-pack`, which is the advertisement a push
+ * fetches first. Both have to resolve to the staging repo or the advertisement
+ * would describe the mirror and the push would then send the wrong delta.
+ */
+function isPushRequest(verb: string, service: string | null): boolean {
+  return WRITE_VERBS.has(verb) || (verb === "info/refs" && service === "git-receive-pack");
 }
 
 /**
@@ -143,23 +161,32 @@ export async function handleWorkerGit(ctx: {
     writeJson(res, 401, { error: "a valid per-worker bearer token is required" });
     return;
   }
-  // `info/refs` names the service it wants in the query string, and
-  // `git-receive-pack` there is the push advertisement — refused for the same
-  // reason the verb itself is.
+  // `info/refs` names the service it wants in the query string. Only git's own
+  // two services exist; anything else is refused rather than passed through to
+  // the backend, so the verb set here stays the whole surface.
   const service = url.searchParams.get("service");
-  if (verb === "info/refs" && service !== "git-upload-pack") {
-    writeJson(res, 403, { error: "only git-upload-pack is served; push is not enabled" });
+  if (verb === "info/refs" && service !== "git-upload-pack" && service !== "git-receive-pack") {
+    writeJson(res, 403, { error: "only git-upload-pack and git-receive-pack are served" });
     return;
   }
+  const push = isPushRequest(verb, service);
 
   const repo = await repoForWorker(identity.callerName);
   if (!repo) {
     writeJson(res, 404, { error: "no repository is served for this worker" });
     return;
   }
-  const gitDir = resolveRepoGitDir(repo);
+  // The allowlist re-check above still governs a push: a Builder whose repo was
+  // revoked mid-flight cannot push either, even though its staging repo is its
+  // own and would otherwise be harmless to write.
+  const gitDir = push ? stagingPathForAgent(identity.callerName) : resolveRepoGitDir(repo);
   if (!existsSync(gitDir)) {
-    logger.log("warn", "worker.git.gitdir-missing", { agent: identity.callerName, repo, gitDir });
+    logger.log("warn", "worker.git.gitdir-missing", {
+      agent: identity.callerName,
+      repo,
+      gitDir,
+      push,
+    });
     writeJson(res, 404, { error: "no repository is served for this worker" });
     return;
   }
@@ -188,8 +215,21 @@ export async function handleWorkerGit(ctx: {
     // `git-daemon-export-ok` marker inside the user's own checkout.
     GIT_HTTP_EXPORT_ALL: "1",
     // Attributes the fetch in git's own logs/hooks to the agent, not to the
-    // daemon's OS user.
+    // daemon's OS user. The `update` hook reads it to decide which refs this
+    // Builder may write (FRI-2077 slice 2).
     REMOTE_USER: identity.callerName,
+    // `git-http-backend` answers 403 to a push unless the served repo has
+    // `http.receivepack=true`. Injected per-request rather than written into
+    // the repo's own config: verified to work, and it leaves the staging repo
+    // holding no state that outlives the request. Absent for a fetch, so the
+    // read path cannot accidentally advertise a writable repo.
+    ...(push
+      ? {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.receivepack",
+          GIT_CONFIG_VALUE_0: "true",
+        }
+      : {}),
     ...(req.headers["content-type"] ? { CONTENT_TYPE: req.headers["content-type"] } : {}),
     ...(req.headers["content-encoding"]
       ? { HTTP_CONTENT_ENCODING: req.headers["content-encoding"] }
@@ -201,6 +241,7 @@ export async function handleWorkerGit(ctx: {
     verb,
     repo,
     gitDir,
+    push,
   });
 
   const child = spawn(backend, [], { env, stdio: ["pipe", "pipe", "pipe"] });

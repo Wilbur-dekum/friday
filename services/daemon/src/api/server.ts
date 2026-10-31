@@ -138,6 +138,7 @@ import { generateScratchName } from "../agent/scratch-names.js";
 import {
   archiveWorkspace,
   createWorkspace,
+  ensureStagingRepo,
   isDaemonOwnedWorkspace,
   workspacePath,
   CONTAINER_WORKSPACE_PATH,
@@ -445,11 +446,12 @@ export const ROUTES: RouteRow[] = [
     handler: async (ctx) => handlePrChecks(ctx),
   },
 
-  // --- The Builder's repository, served to its container (FRI-2076) ---
+  // --- The Builder's repository, served to its container (FRI-2076, FRI-2077) ---
   // Raw: git's smart HTTP is a binary pkt-line protocol, so the handler owns
   // req/res. The repository is NOT in the URL — it is resolved from the
-  // per-worker token, so there is no parameter to traverse. Read-only;
-  // `git-receive-pack` is refused until FRI-2077 adds the ref gate with it.
+  // per-worker token, so there is no parameter to traverse. A fetch is served
+  // from the repo the Builder was cut from; a push from its per-task staging
+  // repo, which nothing prunes.
   {
     method: "GET",
     match: "/api/worker/git/info/refs",
@@ -458,6 +460,11 @@ export const ROUTES: RouteRow[] = [
   {
     method: "POST",
     match: "/api/worker/git/git-upload-pack",
+    raw: (ctx) => handleWorkerGit(ctx),
+  },
+  {
+    method: "POST",
+    match: "/api/worker/git/git-receive-pack",
     raw: (ctx) => handleWorkerGit(ctx),
   },
 
@@ -2377,12 +2384,32 @@ async function createAgent(
       workspaceOwner = "container";
       workingDirectory = CONTAINER_WORKSPACE_PATH;
       worktreePath = CONTAINER_WORKSPACE_PATH;
+      // FRI-2077: the Builder's push target. Created here rather than in
+      // `createWorkspace` because container mode never calls it — there is no
+      // daemon-side worktree to cut. A failure is fatal: a Builder that can
+      // clone but not push has nowhere to deliver work, and discovering that
+      // at the end of a turn is worse than failing the spawn.
+      try {
+        ensureStagingRepo({
+          name: body.name,
+          repo,
+          branch,
+          fromRef: body.worktree?.fromRef,
+        });
+      } catch (err) {
+        return {
+          status: 500,
+          body: {
+            error: `staging repo creation failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        };
+      }
       logger.log("warn", "builder.workspace.container-not-provisioned", {
         agent: body.name,
         repo,
         branch,
         path: CONTAINER_WORKSPACE_PATH,
-        note: "container mode: no repo is served into /workspace yet (FRI-2076)",
+        note: "container mode: the repo is servable (FRI-2076) but nothing clones it into /workspace yet",
       });
     } else {
       try {

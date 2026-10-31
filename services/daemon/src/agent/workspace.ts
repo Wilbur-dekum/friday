@@ -56,6 +56,172 @@ export function reposRoot(): string {
   return REPOS_ROOT;
 }
 
+/**
+ * Per-task staging repos live here (FRI-2077).
+ *
+ * A containerised Builder clones from the daemon (FRI-2076) and has to push its
+ * branch back somewhere. Neither end of `resolveRepoGitDir` can be that
+ * somewhere:
+ *
+ *   - The bare `--mirror` under `<DATA_DIR>/repos/` is refreshed with `git
+ *     remote update --prune`, and a mirror's refspec is `+refs/*:refs/*`. A
+ *     Builder branch sitting there un-forwarded is PRUNED by the next
+ *     `createWorkspace` against that mirror. Measured, including for refs
+ *     parked outside `refs/heads/*` — nothing under `refs/` survives.
+ *   - A local-path repo IS the user's own working repository, so landing
+ *     pushes there writes Builder refs into the daily driver's checkout.
+ *
+ * So each task gets its own bare repo that nothing prunes and nothing else
+ * reads. A mirror is BY DEFINITION a copy of upstream, so holding state that
+ * exists only locally in one is wrong regardless of ordering; this is the
+ * per-task shape FRI-2038 already uses for volumes, applied to refs.
+ */
+const STAGING_ROOT = join(DATA_DIR, "staging");
+
+export function stagingRoot(): string {
+  return STAGING_ROOT;
+}
+
+/**
+ * The staging repo for one Builder.
+ *
+ * `name` reaches here from the agent registry rather than from a URL, so it is
+ * not attacker-chosen the way a request parameter is. It is still interpolated
+ * into a filesystem path, and rejecting separators outright is cheaper than
+ * reasoning about every caller: no legitimate agent name contains one.
+ */
+export function stagingPathForAgent(name: string): string {
+  if (name === "" || name === "." || name === ".." || /[/\\]/.test(name)) {
+    throw new Error(`invalid agent name for a staging repo: ${name}`);
+  }
+  return join(STAGING_ROOT, `${name}.git`);
+}
+
+/**
+ * Containment guard for the staging root, in the shape of
+ * `assertInsideWorkspacesRoot` and for the same reason: resolve through
+ * realpath so a symlink cannot redirect a removal outside the root.
+ */
+function assertInsideStagingRoot(candidate: string): string {
+  const rootReal = realpathSync(STAGING_ROOT).replace(/\/+$/, "");
+  const candidateReal = realpathWithMissingTail(candidate);
+  if (candidateReal === rootReal) {
+    throw new Error(`refusing to delete the staging root itself: ${rootReal}`);
+  }
+  if (!candidateReal.startsWith(rootReal + "/")) {
+    throw new Error(`refusing to operate on path outside ${rootReal}: ${candidateReal}`);
+  }
+  return candidateReal;
+}
+
+/**
+ * Create a Builder's staging repo, seeded so its first push is a delta.
+ *
+ * `git init --bare` alone is correct but wasteful: an empty repo shares no
+ * objects with the clone the Builder pushes from, so the push would carry the
+ * project's entire history back over the loopback. Seeding the base ref costs
+ * one local fetch and turns that into a fast-forward of a few commits.
+ *
+ * A seed failure is deliberately NOT fatal. The staging repo still accepts the
+ * push, it just carries more objects — refusing to create a Builder because an
+ * optimization failed would be the wrong trade. Same fail-soft shape as
+ * `ensureMirror`'s stale-fetch path.
+ */
+export function ensureStagingRepo(opts: {
+  name: string;
+  repo: string;
+  branch: string;
+  fromRef?: string;
+}): string {
+  const stagingPath = stagingPathForAgent(opts.name);
+  if (!existsSync(STAGING_ROOT)) {
+    mkdirSync(STAGING_ROOT, { recursive: true });
+  }
+  if (!existsSync(stagingPath)) {
+    execFileSync("git", ["init", "--bare", "--quiet", stagingPath], { stdio: "pipe" });
+    logger.log("info", "workspace.staging.init", { name: opts.name, path: stagingPath });
+  }
+
+  // Candidate seed refs, best first. The mode split is the same one
+  // `createWorkspace`'s start-point makes: a `--mirror` clone maps remote heads
+  // into `refs/heads/*`, while a local checkout keeps upstream main at
+  // `refs/remotes/origin/main`. The local path then falls back to the repo's
+  // OWN `main`, because a checkout with no `origin` is ordinary — a fresh repo,
+  // or one that only ever existed locally — and the seed is an optimization, so
+  // giving up on it there would silently cost a full-history push.
+  const gitDir = resolveRepoGitDir(opts.repo);
+  const candidates = opts.fromRef
+    ? [opts.fromRef]
+    : isLocalRepo(opts.repo)
+      ? ["refs/remotes/origin/main", "refs/heads/main"]
+      : ["refs/heads/main"];
+
+  const failures: string[] = [];
+  for (const srcRef of candidates) {
+    try {
+      execFileSync(
+        "git",
+        [
+          "-C",
+          stagingPath,
+          ...GIT_TRANSPORT_HARDENING,
+          "fetch",
+          "--no-tags",
+          gitDir,
+          `${srcRef}:refs/heads/${opts.branch}`,
+        ],
+        { stdio: "pipe" },
+      );
+      return stagingPath;
+    } catch (err) {
+      const e = err as Error & { stderr?: Buffer | string };
+      failures.push(`${srcRef}: ${e.stderr ? String(e.stderr).trim() : (e.message ?? err)}`);
+    }
+  }
+  logger.log("warn", "workspace.staging.seed.fail", {
+    name: opts.name,
+    stagingPath,
+    tried: candidates,
+    failures,
+    note: "push will carry full history instead of a delta",
+  });
+  return stagingPath;
+}
+
+/**
+ * Remove a Builder's staging repo.
+ *
+ * SLICE 3 WILL NEED TO GATE THIS. Once `post-receive` forwards pushes onward,
+ * removing staging while it still holds a ref that was never forwarded throws
+ * away the Builder's work — which is the entire reason pushes land here rather
+ * than in the prunable mirror. Today nothing forwards, so there is nothing to
+ * retain and unconditional removal is what keeps the directory from leaking.
+ */
+export function removeStagingRepo(name: string): void {
+  let stagingPath: string;
+  try {
+    stagingPath = stagingPathForAgent(name);
+  } catch (err) {
+    logger.log("warn", "workspace.staging.remove.skip", {
+      name,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+  if (!existsSync(stagingPath)) return;
+  try {
+    assertInsideStagingRoot(stagingPath);
+    rmSync(stagingPath, { recursive: true, force: true });
+    logger.log("info", "workspace.staging.removed", { name, path: stagingPath });
+  } catch (err) {
+    logger.log("warn", "workspace.staging.remove.fail", {
+      name,
+      stagingPath,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 /** Marker file dropped inside every workspace so the worker can verify it and
  * the archive path can recover the git dir the workspace was created from. */
 const WORKSPACE_MARKER = ".friday-workspace.json";
@@ -591,8 +757,12 @@ export function archiveWorkspace(
   if (!daemonOwned) {
     logger.log("info", "workspace.destroy.container-owned", {
       name,
-      note: "volume teardown is the broker's; only the branch is deleted here",
+      note: "volume teardown is the broker's; the branch and staging repo are deleted here",
     });
+    // FRI-2077: the staging repo is the daemon's, not the broker's, so it is
+    // not covered by the volume teardown above. Only container workspaces have
+    // one — a daemon-owned Builder pushes through its worktree.
+    removeStagingRepo(name);
   } else if (existsSync(path)) {
     // FIX_FORWARD 6.4: containment check before any rm-equivalent op.
     // Resolves symlinks so we never delete outside ~/.friday/workspaces/.

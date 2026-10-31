@@ -429,15 +429,49 @@ decides it:
    what is servable, and it is re-checked on every request, so narrowing the
    allowlist reaches Builders already running.
 
-Read-only: `git-receive-pack` is refused, and so is
-`info/refs?service=git-receive-pack`, the push advertisement. Push arrives in
-FRI-2077 together with the `post-receive` ref gate that makes it safe — the
-transport is deliberately not enabled before the gate exists.
+**Landed (FRI-2077, slice 1): the push transport, into a staging repo.** A
+third route carries the push, and a push is **not** served from the repo the
+fetch is:
 
-**Still missing:** nothing else for a read-only Builder. Spawning one with
-container mode on still logs `builder.workspace.container-not-provisioned`
-until the clone is wired into the worker's startup, and pushing its work back
-is FRI-2077.
+| Route                                   | What              | Served from            |
+| --------------------------------------- | ----------------- | ---------------------- |
+| `GET /api/worker/git/info/refs`         | ref advertisement | fetch: the source repo |
+| `POST /api/worker/git/git-upload-pack`  | the fetch         | the source repo        |
+| `POST /api/worker/git/git-receive-pack` | the push          | `<DATA_DIR>/staging/`  |
+
+`info/refs?service=git-receive-pack` resolves to staging too — if the
+advertisement described the source repo, the client would compute its delta
+against refs the push target does not have.
+
+Neither end of `resolveRepoGitDir` can receive a push. The bare `--mirror`
+under `<DATA_DIR>/repos/` is refreshed with `git remote update --prune`, and a
+mirror's refspec is `+refs/*:refs/*` — a Builder branch sitting there
+un-forwarded is pruned by the next `createWorkspace` against that mirror
+(measured, including for refs parked outside `refs/heads/*`; nothing under
+`refs/` survives). And a local-path repo **is** the user's own checkout, so
+landing pushes there writes Builder refs into the daily driver. So each task
+gets its own bare repo that nothing prunes and nothing else reads — the
+per-task shape FRI-2038 already uses for volumes, applied to refs.
+
+It is seeded from the base ref at spawn so the first push is a delta rather
+than the whole history over loopback; a seed failure is non-fatal and only
+costs that optimization. `http.receivepack=true` is injected per-request via
+`GIT_CONFIG_COUNT`, so the served repo keeps no state that outlives the
+request. The allowlist re-check governs the push half too: a repo revoked
+mid-flight stops the write, not just the read.
+
+Allowing `git-receive-pack` does not reintroduce the window FRI-2076 refused
+it over. A Builder can write arbitrary refs into its **own** staging repo,
+which nothing prunes, nothing else reads, and — until slice 3's `post-receive`
+— nothing forwards. The ref gate still belongs in `update`, the only hook
+where rejection exists (slice 2); it is simply not what makes the transport
+safe to serve.
+
+**Still missing:** the clone. Spawning a Builder with container mode on still
+logs `builder.workspace.container-not-provisioned` — the repo is servable and
+now writable, but nothing runs `git clone` into `/workspace`, so the volume
+stays empty. Slices 2 and 3 of FRI-2077 add the `update` ref gate and the
+`post-receive` forward to GitHub.
 
 ### Hostname and the reverse proxy
 
@@ -540,6 +574,8 @@ Everything lives at `~/.friday/`:
 ├── apps/<id>/                 Installed Friday Apps (ADR-021)
 ├── schedules/<name>/          Scheduled-agent state continuity (state.md + last-run.md)
 ├── workspaces/<name>/         Builder git worktrees
+├── staging/<name>.git/        Per-Builder bare push target for a containerised Builder
+│                              (FRI-2077). Never pruned, unlike the repos/ mirrors
 ├── profiles/<name>.sb         Per-builder sandbox-exec SBPL profiles (0600 — see docs/sandbox.md, ADR-021)
 ├── backups/<ts>.tar.gz        Output of `friday backup` (gitignored)
 ├── state/                     Daemon runtime state (per-service start markers ADR-028; cloudflared-token.sha256 tunnel fingerprint FRI-166)
