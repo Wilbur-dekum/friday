@@ -85,6 +85,11 @@ pnpm test:e2e           # multi-subprocess e2e (daemon + dashboard + zero-cache 
 pnpm test:playwright    # browser-driven user-visible round-trip; slowest, needs chromium installed
 pnpm test:clean         # reclaim leaked test artifacts (orphan tmp data dirs + idle scratch DBs); run when no test run is in progress
 pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
+
+# The containerised-Builder e2e needs a builder image built from YOUR branch. It
+# skips itself when one is absent — a stale image would silently test old code.
+docker build --target worker -t friday-worker:e2e .
+FRIDAY_E2E_BUILDER_IMAGE=friday-worker:e2e pnpm test:e2e
 ```
 
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo.
