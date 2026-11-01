@@ -741,8 +741,11 @@ FRI-2039 put `api.anthropic.com` on the egress allowlist, which made the
 destination reachable and said nothing about authenticating to it. That
 distinction is why ADR-055 exists.
 
-Two ways to close it, and ADR-055 requires choosing deliberately rather than
-reaching for the easy one:
+**ADR-055 rule 2 settles the default.** Against the status quo, routing the
+model API through the daemon looked like the expensive option; against a system
+whose external egress is consolidating on one chokepoint, it is the direction
+things are going anyway. So `brokered` is the default and an exception has to
+argue for itself. The two options, stated fully:
 
 1. **`brokered`** — point `ANTHROPIC_BASE_URL` at the daemon, which injects the
    credential and forwards. The builder holds nothing, and
