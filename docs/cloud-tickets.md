@@ -783,48 +783,65 @@ loop together. `container-builder.e2e.test.ts` is where that goes.
 
 ### FRI-2087 — Hosted MCP is unreachable from a containerised builder
 
-`bug` · parent FRI-2036 · ADR-055 · **blocks moving work into Friday**
+`bug` · parent FRI-2036 · ADR-055 · **done**
 
 Found by running the full stack for the first time (broker + internal network +
 real builder image + real daemon). A containerised Builder took a turn through
 FRI-2084's brokered model route, wrote its file and reported — and said
 _"`mail_send` is not in my available tool list this session"_. The daemon logged
-**zero** MCP events.
+**zero** MCP events. It could write code and could not mail the orchestrator,
+read tickets, use memory, or open a PR.
 
-`/api/mcp/<server>` is declared `auth: true`, so `handle()` demands the shared
-daemon secret **on top of** the per-worker token `handleWorkerFacing` has
-already verified. The broker mounts only `/workspace`, so the builder has no
-`/data` — and `getDaemonSecret()` then **mints a fresh secret** instead of
-failing, producing one the daemon has never seen. Confirmed by comparing
-digests: builder `7148308e…`, daemon `f143b7ea…`.
+**It was two independent faults, and only the first was visible at first.**
 
-Probed from inside the container, the two rejections differ, which is what
-localises it:
+**1. The route's auth gate could not be satisfied.** `/api/mcp/<server>` is the
+one worker-facing route declaring `auth: true`, so `handle()` ran
+`authorizeSameHost` on top of the per-worker token `handleWorkerFacing` had
+already verified. That gate wants a loopback `Host` — a builder's is
+`friday:7611` — **and** the shared daemon secret, which a builder has no
+`/data` mount to read. Worse, `getDaemonSecret()` **mints** a secret when the
+file is absent, so instead of failing it produced one the daemon had never
+seen. Measured: digests differed (builder `7148308e…`, daemon `f143b7ea…`), and
+the two rejections differ in a way that localises it —
 
 ```
 token only            -> 401 {"error":"unauthorized"}                        (route auth)
-token + wrong secret  -> 401 {"error":"unauthorized"}
 no auth at all        -> 401 "a valid per-worker bearer token is required"   (worker gate)
 ```
 
-So the token passes and the secret check is what fails.
+Fixed per `worker-listener.ts`'s own principle: the worker-facing listener gets
+its own dep set whose `authorize` is the per-worker token. The loopback
+listener's gate is untouched — a token is sufficient _there_ because that
+surface serves nine routes, not because the daemon now takes tokens for all
+ninety. The daemon secret is also no longer sent off-loopback at all, which
+stops the minting at source.
 
-Blast radius is exactly one route — and it carries all 14 hosted servers. A
-containerised Builder can write code and **cannot** mail the orchestrator, read
-tickets, use memory, or open a PR. The git routes (FRI-2076/2077) and the model
-route (FRI-2084) work precisely because neither declares `auth: true`.
+**2. Hosted tools then connected and 404ed on use.** With the servers
+reachable, `mail_send` appeared in the tool list and returned
+`daemonFetch POST /api/mail/send -> 404: {"error":"not found"}` — the worker
+gate's own 404. `daemonFetch` resolves through `resolveDaemonBaseUrl`, which
+prefers `FRIDAY_DAEMON_URL`; that variable exists so a worker in a container
+can find the daemon, and every container Deployment must set it. So the
+daemon's own **self-calls** were being addressed to the worker-facing listener.
 
-**The fix follows `worker-listener.ts`'s own stated principle:** the per-worker
-token is the only thing that should authenticate on that listener, because the
-daemon secret sits on a volume any builder in the Deployment container can read
-and therefore "identifies nothing" on a network boundary. A valid worker token
-should satisfy `auth` for a worker-facing route. Mounting `/data` to make the
-secret match is the wrong fix — it hands the untrusted container the shared
-secret and the whole vault.
+`worker-listener.ts` had assumed this away — "their handlers now run INSIDE the
+daemon, so their `daemonFetch` calls are self-calls and never cross a network".
+True of the process, not of the URL. Fixed with a process-scoped marker: the
+daemon states once at boot that it is the daemon, and self-calls resolve to
+loopback. A worker never sets it, so the default stays correct for the worker
+path — forgetting to mark degrades to the old behaviour rather than
+misdirecting a worker.
 
-Secondary, and worth fixing on its own: `getDaemonSecret()` creating a secret
-when the file is absent turns a hard failure into a silent mismatch. In a
-process that has no business holding one, absent should mean absent.
+**Verified live, which is the only way either fault was ever going to surface.**
+A fresh containerised Builder was asked to mail the orchestrator and did:
+`mail sent (id=9)`, with the row present as `e2e-mcp2 -> friday | FRI-2087 |
+MCP WORKS`. The loop closes.
+
+The test added for the first fault drives real HTTP against the real listener
+on purpose: the defect was in the WIRING — which dep set `handleWorkerFacing`
+passed to `handle` — so a test calling the authorize predicate directly would
+have passed while the daemon stayed broken. Mutation-confirmed: reverting the
+dep swap fails the suite.
 
 ### FRI-2088 — Archiving a containerised Builder leaks its container and volume
 

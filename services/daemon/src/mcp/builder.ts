@@ -121,11 +121,22 @@ function hostedServerConfig(
   name: HostedServerName,
   opts: BuildMcpServersOptions,
 ): McpHttpServerConfig {
+  const base = resolveDaemonBaseUrl(opts.daemonPort);
+  // FRI-2087: the daemon secret goes ONLY to the loopback listener.
+  //
+  // Off-loopback this is the worker-facing listener, which authorizes by the
+  // per-worker token (see `workerRouterDeps`). Sending the shared secret there
+  // would be sending a credential to a surface that does not use it — and
+  // worse, building the header CREATES one: `getDaemonSecret()` writes a fresh
+  // secret when the file is absent, which in a builder container (no `/data`
+  // mount) means minting a value the daemon has never seen. That silent
+  // mismatch is what left a containerised Builder with no Friday tools.
+  const loopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i.test(base);
   return {
     type: "http",
-    url: `${resolveDaemonBaseUrl(opts.daemonPort)}${hostedServerPath(name)}`,
+    url: `${base}${hostedServerPath(name)}`,
     headers: {
-      [DAEMON_SECRET_HEADER]: getDaemonSecret(),
+      ...(loopback ? { [DAEMON_SECRET_HEADER]: getDaemonSecret() } : {}),
       // FRI-2037: the worker proves WHICH worker it is. The daemon derives
       // callerName/callerType from this token, so the worker no longer names
       // itself — a worker holding the shared secret could previously claim to
