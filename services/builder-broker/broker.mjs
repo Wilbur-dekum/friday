@@ -181,6 +181,24 @@ export function egressProxyUrl(base, token) {
   }
 }
 
+/**
+ * Where the builder's SDK sends model traffic (FRI-2084).
+ *
+ * The daemon's worker listener plus the model route's prefix. Returns null for
+ * an unusable base rather than a half-formed URL, so a misconfiguration fails
+ * as "no brokered model access" instead of as a mystery 404 mid-turn.
+ */
+export function egressModelBaseUrl(proxyUrl) {
+  try {
+    const u = new URL(proxyUrl);
+    u.username = "";
+    u.password = "";
+    return `${u.origin}/api/model`;
+  } catch {
+    return null;
+  }
+}
+
 export function egressNoProxy(proxyUrl) {
   try {
     const host = new URL(proxyUrl).hostname;
@@ -218,6 +236,19 @@ export function buildContainerSpec(taskId, callerEnv) {
     // there, and routing them through CONNECT would refuse them (not on the
     // allowlist, and not port 443).
     const noProxy = egressNoProxy(EGRESS_PROXY);
+    // FRI-2084: brokered model access. The builder gets no Anthropic key —
+    // it gets the daemon's model route plus its OWN worker token, which the
+    // daemon swaps for the real credential. `ANTHROPIC_AUTH_TOKEN` is how the
+    // SDK sends a bearer instead of an `x-api-key`, which is exactly the
+    // header the daemon already authenticates workers with.
+    //
+    // Derived from the same operator setting as the proxy because they are the
+    // same listener: one source of truth for "where the daemon is, seen from
+    // inside a builder". Three settings that must agree is a way for them to
+    // disagree. NO_PROXY already covers this host, so model traffic goes
+    // straight to the daemon rather than out through CONNECT.
+    const modelBase = egressModelBaseUrl(EGRESS_PROXY);
+    const workerToken = (callerEnv ?? {}).FRIDAY_WORKER_TOKEN;
     env.push(
       `HTTPS_PROXY=${proxyUrl}`,
       `https_proxy=${proxyUrl}`,
@@ -226,6 +257,9 @@ export function buildContainerSpec(taskId, callerEnv) {
       `NO_PROXY=${noProxy}`,
       `no_proxy=${noProxy}`,
     );
+    if (modelBase && workerToken) {
+      env.push(`ANTHROPIC_BASE_URL=${modelBase}`, `ANTHROPIC_AUTH_TOKEN=${String(workerToken)}`);
+    }
   }
   return {
     Image: BUILDER_IMAGE,

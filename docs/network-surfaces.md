@@ -7,10 +7,15 @@ makes them a lookup rather than a discovery.
 
 It exists because they were discovered. Three times in a row, a builder
 container turned out to need something external that nothing supplied: git
-(closed by FRI-2076/2077), the GitHub API (FRI-2078), and the model API — which
-is **still broken**, found only when someone asked whether work could actually
-move into Friday. Each was handled as its own surprise. The pattern was
-available the whole time.
+(closed by FRI-2076/2077), the GitHub API (FRI-2078), and the model API —
+found only when someone asked whether work could actually move into Friday, and
+closed by FRI-2084. Each was handled as its own surprise. The pattern was
+available the whole time, which is what this register is for.
+
+FRI-2084 is also the worked example of rule 2 paying off rather than costing:
+brokering the model API **removed** `api.anthropic.com` from the egress
+allowlist, so closing a credential gap shrank the builder's permitted
+destinations instead of growing them.
 
 ## The four patterns
 
@@ -78,6 +83,7 @@ ADR-055, not built.
 | Builder → daemon worker listener (`:7611`)             | Int     | per-worker bearer token; never the daemon secret                                                                      | n/a     | **used**                            |
 | Builder → `git-upload-pack` / `git-receive-pack`       | Int     | per-worker bearer token                                                                                               | n/a     | **used**                            |
 | Builder → hosted MCP (`/api/mcp/<server>`, 14 servers) | Int     | per-worker bearer token                                                                                               | n/a     | **used**                            |
+| Builder → model route (`/api/model/*`)                 | Int     | per-worker bearer token, sent as the SDK's `ANTHROPIC_AUTH_TOKEN`                                                     | n/a     | **used** (FRI-2084)                 |
 | Daemon → broker (`:7612`)                              | Int     | `BROKER_TOKEN`                                                                                                        | n/a     | **used**                            |
 | Webhooks in (Linear / GitHub / Slack)                  | **Ext** | —                                                                                                                     | —       | **unknown** — E3/E5, no surface yet |
 
@@ -87,18 +93,18 @@ tomorrow is loopback-only by default, which is the safe direction to fail.
 
 ## Egress from a builder container
 
-| Destination                             | Int/Ext | Credential                               | Pattern         | State                                                                     |
-| --------------------------------------- | ------- | ---------------------------------------- | --------------- | ------------------------------------------------------------------------- |
-| Everything, by default                  | —       | —                                        | **denied**      | **used** — `internal: true`, measured `ENETUNREACH`                       |
-| Daemon (API, MCP, git, command channel) | Int     | worker token                             | **brokered**    | **used**                                                                  |
-| git → the real origin                   | **Ext** | GitHub token, never in the container     | **brokered**    | **used** (FRI-2077)                                                       |
-| GitHub API (PR create, checks)          | **Ext** | GitHub token, never in the container     | **brokered**    | **used** (FRI-2078)                                                       |
-| `api.anthropic.com`                     | **Ext** | Anthropic key — **nothing supplies one** | relayed (wrong) | ⚠️ **BROKEN** — FRI-2084                                                  |
-| npm / yarn registries (public)          | **Ext** | none                                     | **relayed**     | **used** (FRI-2039)                                                       |
-| Private package registries              | **Ext** | registry token                           | —               | **unknown** — would be `caller-held`; FRI-2086                            |
-| `WebFetch` (the tool is enabled)        | **Ext** | none                                     | relayed (fails) | ⚠️ **BROKEN** — Node `fetch` ignores the proxy; FRI-2085                  |
-| `WebSearch`                             | ?       | none                                     | —               | **unknown** — server-side at Anthropic, or client-side? FRI-2085          |
-| User-configured MCP servers             | **Ext** | **each brings its own API key**          | —               | ⚠️ **unbounded** — stdio-only, so they run _inside_ the builder; FRI-2086 |
+| Destination                             | Int/Ext | Credential                                                      | Pattern         | State                                                                     |
+| --------------------------------------- | ------- | --------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------- |
+| Everything, by default                  | —       | —                                                               | **denied**      | **used** — `internal: true`, measured `ENETUNREACH`                       |
+| Daemon (API, MCP, git, command channel) | Int     | worker token                                                    | **brokered**    | **used**                                                                  |
+| git → the real origin                   | **Ext** | GitHub token, never in the container                            | **brokered**    | **used** (FRI-2077)                                                       |
+| GitHub API (PR create, checks)          | **Ext** | GitHub token, never in the container                            | **brokered**    | **used** (FRI-2078)                                                       |
+| `api.anthropic.com`                     | **Ext** | injected by the daemon; the builder holds only its worker token | **brokered**    | **used** (FRI-2084) — and the host is NO LONGER on the egress allowlist   |
+| npm / yarn registries (public)          | **Ext** | none                                                            | **relayed**     | **used** (FRI-2039)                                                       |
+| Private package registries              | **Ext** | registry token                                                  | —               | **unknown** — would be `caller-held`; FRI-2086                            |
+| `WebFetch` (the tool is enabled)        | **Ext** | none                                                            | relayed (fails) | ⚠️ **BROKEN** — Node `fetch` ignores the proxy; FRI-2085                  |
+| `WebSearch`                             | ?       | none                                                            | —               | **unknown** — server-side at Anthropic, or client-side? FRI-2085          |
+| User-configured MCP servers             | **Ext** | **each brings its own API key**                                 | —               | ⚠️ **unbounded** — stdio-only, so they run _inside_ the builder; FRI-2086 |
 
 `McpServerConfig` is `{ name, command, args?, env?, scope? }` — stdio only.
 There is no remote-MCP shape, so a user-configured server is arbitrary code
@@ -145,12 +151,11 @@ under control (5); FRI-2041, blocked on FRI-2056.
 
 ## Open items
 
-| Ticket   | Surface                                      | Needs deciding                                                                     |
-| -------- | -------------------------------------------- | ---------------------------------------------------------------------------------- |
-| FRI-2084 | builder → model API                          | **`brokered`** — rule 2's default; a `caller-held` exception must argue for itself |
-| FRI-2085 | non-proxy-aware clients; the SDK's web tools | whether `relayed` becomes intercepting, and what `WebSearch` does                  |
-| FRI-2086 | user-configured MCP servers                  | a credential-injecting broker, versus keys in the untrusted tier                   |
-| FRI-2040 | per-Organization isolation                   | mostly delivered by FRI-2039's internal network; wants re-scoping                  |
+| Ticket   | Surface                                      | Needs deciding                                                    |
+| -------- | -------------------------------------------- | ----------------------------------------------------------------- |
+| FRI-2085 | non-proxy-aware clients; the SDK's web tools | whether `relayed` becomes intercepting, and what `WebSearch` does |
+| FRI-2086 | user-configured MCP servers                  | a credential-injecting broker, versus keys in the untrusted tier  |
+| FRI-2040 | per-Organization isolation                   | mostly delivered by FRI-2039's internal network; wants re-scoping |
 
 ## Adding a surface
 

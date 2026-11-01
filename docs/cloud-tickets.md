@@ -723,41 +723,63 @@ Coarse by design — refine when reached.
 
 ### FRI-2084 — A containerised builder has no model credential, so it cannot take a turn
 
-`bug` · parent FRI-2036 · ADR-055 · **blocks moving work into Friday**
+`bug` · parent FRI-2036 · ADR-055 · **done**
 
-The broker's `ALLOWED_ENV` permits five keys and `container-runtime.ts` sends
-exactly those five — `FRIDAY_WORKER_TOKEN`, `FRIDAY_DAEMON_URL`,
-`FRIDAY_AGENT_NAME`, `FRIDAY_TASK_ID`, `FRIDAY_WORKSPACE_BRANCH`. None is an
-Anthropic credential. The image carries none either (verified: `env` in the
-built image matches nothing on `anthropic|claude|token|key`), and
-`claudeCodeChildEnv()` can only pass through what the worker already holds.
-
-So a containerised Builder starts, clones `/workspace` successfully, and then
-cannot authenticate the SDK. The symptom is the one `docker-compose.yml`
-already documents for the daemon: `Not logged in · Please run /login`, which
-the daemon rewrites as an assistant block and retries forever.
+The broker's `ALLOWED_ENV` permitted five keys and `container-runtime.ts` sent
+exactly those five — none an Anthropic credential. The image carried none
+either (verified: `env` in the built image matched nothing on
+`anthropic|claude|token|key`), and `claudeCodeChildEnv()` can only pass through
+what the worker already holds. So a containerised Builder started, cloned
+`/workspace` successfully, and then could not authenticate the SDK. The symptom
+is the one `docker-compose.yml` already documents for the daemon:
+`Not logged in · Please run /login`, which the daemon rewrites as an assistant
+block and retries forever.
 
 FRI-2039 put `api.anthropic.com` on the egress allowlist, which made the
 destination reachable and said nothing about authenticating to it. That
 distinction is why ADR-055 exists.
 
-**ADR-055 rule 2 settles the default.** Against the status quo, routing the
-model API through the daemon looked like the expensive option; against a system
-whose external egress is consolidating on one chokepoint, it is the direction
-things are going anyway. So `brokered` is the default and an exception has to
-argue for itself. The two options, stated fully:
+**Closed as `brokered`, which ADR-055 rule 2 made the default.** The builder
+gets `ANTHROPIC_BASE_URL` pointed at the daemon's own `/api/model/` route and
+`ANTHROPIC_AUTH_TOKEN` set to its **own per-worker token** — the SDK sends that
+as `Authorization: Bearer …`, which is the header `workerFromRequest` already
+reads on every other worker-facing route. So the builder authenticates to the
+model path with a credential it already has, and gaining nothing new is the
+point. The daemon strips the inbound token and injects the Deployment's real
+credential; Anthropic never sees a worker token.
 
-1. **`brokered`** — point `ANTHROPIC_BASE_URL` at the daemon, which injects the
-   credential and forwards. The builder holds nothing, and
-   `api.anthropic.com` leaves the egress allowlist entirely, which is strictly
-   tighter than what shipped. Cost: a streaming proxy on the turn hot path
-   (SSE passthrough, latency, reliability).
-2. **A named `caller-held` exception** — add the three Anthropic keys to
-   `ALLOWED_ENV`. Roughly one line, unblocks dogfooding immediately, and puts
-   the model credential in the untrusted container where the Bash tool can read
-   it. ADR-054 and FRI-2059 already accept exactly this risk for the forked
-   worker; this extends it to the place untrusted code is most expected to run.
-   Permitted only as a time-boxed exception with (1) filed as the real fix.
+**The payoff, and the reason this was worth doing properly:**
+`api.anthropic.com` came **off** the egress allowlist. Closing the credential
+gap shrank the builder's permitted destinations rather than growing them, which
+is the shape rule 2 predicted.
+
+Constraints the implementation respects:
+
+- **The caller chooses the path, never the host.** One fixed upstream, and the
+  path matched against an allowlist of the four endpoints a turn uses rather
+  than concatenated. Otherwise the route is an SSRF primitive with Friday's own
+  model credential attached — strictly worse than the gap it closes.
+- **Streamed both ways.** A turn is a long SSE response; buffering would delay
+  every block to the end of the turn and hold a whole response per worker.
+- **No credential the caller can pin.** `x-api-key` and `authorization` are
+  both dropped from the forwarded request. The `x-api-key` drop only bites on a
+  Deployment that authenticates by TOKEN — with an API-key Deployment the
+  injected header happens to overwrite it — which is why that case has its own
+  test.
+- **Fails loudly with no credential configured** (503), rather than forwarding
+  unauthenticated and surfacing as a 401 the agent reads as its own problem.
+- **Broker-set, not caller-set.** `ANTHROPIC_BASE_URL` and
+  `ANTHROPIC_AUTH_TOKEN` are not in `ALLOWED_ENV`; a caller that could choose
+  the base URL could point a worker token at a host of its own. The base is
+  derived from the same operator setting as the egress proxy, because they are
+  the same listener — three settings that must agree is a way for them to
+  disagree.
+
+Still true, and the reason this is not yet the end of the story: **no container
+has run a full turn through it.** The route is tested against real sockets and
+a real streaming upstream, and the broker's env is pinned by tests, but the
+broker, a real builder image, the proxy and this route have not been in one
+loop together. `container-builder.e2e.test.ts` is where that goes.
 
 ### FRI-2085 — `relayed` egress does not reach clients that ignore proxy env
 
