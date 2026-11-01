@@ -184,6 +184,7 @@ import {
   WORKER_FACING_ROUTES,
 } from "./worker-listener.js";
 import { attachEgressProxy, createHttpEgressHandler } from "./worker-egress.js";
+import { markDaemonSelfCalls } from "../mcp/http.js";
 import { attachWorkerChannel } from "./worker-channel.js";
 import { handleWorkerGit } from "./worker-git.js";
 import { handleModelProxy } from "./model-proxy.js";
@@ -205,6 +206,10 @@ export interface StartServerOptions {
 
 export function startServer(opts: StartServerOptions) {
   const cfg = loadConfig();
+  // FRI-2087: hosted MCP servers run in THIS process, so their `daemonFetch`
+  // calls are self-calls and must go to loopback — not to `FRIDAY_DAEMON_URL`,
+  // which points at the worker-facing listener and serves nine routes.
+  markDaemonSelfCalls();
   const server = createServer((req, res) => handle(req, res, cfg));
   server.listen(opts.port, "127.0.0.1");
   logger.log("info", "api.listening", { port: opts.port });
@@ -277,13 +282,15 @@ async function handleWorkerFacing(
     writeJson(res, 401, { error: "a valid per-worker bearer token is required" });
     return;
   }
-  await handle(req, res, cfg);
+  // The token, not the daemon secret. See `workerRouterDeps`.
+  await handle(req, res, cfg, workerRouterDeps);
 }
 
 async function handle(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ReturnType<typeof loadConfig>,
+  deps: RouterDeps = routerDeps,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
@@ -297,7 +304,7 @@ async function handle(
   // declarative row. A no-match falls through to the terminal 404 below.
   const matched = matchRoute(ROUTES, method, path);
   if (matched) {
-    return handleRequest(matched, { req, res, url, path, method, cfg }, routerDeps);
+    return handleRequest(matched, { req, res, url, path, method, cfg }, deps);
   }
 
   return json(res, 404, { error: "not found", path });
@@ -320,6 +327,40 @@ const MemoryUpsertSchema = z.object({
 /** IO the adapter depends on: the real same-host gate + the real body reader. */
 const routerDeps: RouterDeps = {
   authorize: authorizeSameHost,
+  readBody: (req) => readJson<unknown>(req),
+};
+
+/**
+ * The worker-facing listener's own authorization (FRI-2087).
+ *
+ * `authorizeSameHost` asks two things a containerised worker cannot satisfy and
+ * should not be asked: a loopback `Host` (a builder's is `friday:7611`) and the
+ * shared daemon secret. Measured — `/api/mcp/<server>` is the one worker-facing
+ * route declaring `auth: true`, and it rejected every request from a real
+ * builder, so a containerised Builder had NO Friday tools at all: no mail, no
+ * tickets, no memory, no PR. It could write code and not report.
+ *
+ * The per-worker token is the right credential here, and `worker-listener.ts`
+ * already says so: the daemon secret sits on a volume any builder in the
+ * Deployment container can read, so on a network boundary it identifies
+ * nothing, while the token is minted per worker and revoked when it exits.
+ *
+ * Kept as a distinct dep set rather than widening `authorizeSameHost`, so the
+ * loopback listener's gate is untouched: a worker token is sufficient HERE
+ * because this listener serves nine routes, not because the daemon now accepts
+ * tokens everywhere.
+ *
+ * This check cannot be falsified on its own, and that is deliberate rather
+ * than dead code — mutating it to `() => true` passes the suite, because
+ * `handleWorkerFacing` has already rejected a tokenless request before `handle`
+ * runs. Both layers are needed and they cover different sets: the outer check
+ * guards ALL nine worker-facing routes, eight of which declare no `auth` at
+ * all, while this one satisfies the single route that does. Writing the real
+ * check rather than `true` means removing the outer gate degrades to "token
+ * required" instead of "open".
+ */
+const workerRouterDeps: RouterDeps = {
+  authorize: (req) => workerFromRequest(req) !== null,
   readBody: (req) => readJson<unknown>(req),
 };
 

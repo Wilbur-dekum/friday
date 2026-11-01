@@ -49,10 +49,54 @@ export interface DaemonFetchOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Whether this process IS the daemon (FRI-2087).
+ *
+ * `daemonFetch` serves two callers with opposite needs, and one setting was
+ * answering for both:
+ *
+ *  - an MCP server running in a WORKER, which may be in a container, must
+ *    reach the daemon at `FRIDAY_DAEMON_URL`;
+ *  - a HOSTED server, which runs inside the daemon, is calling itself and must
+ *    use loopback.
+ *
+ * `resolveDaemonBaseUrl` prefers `FRIDAY_DAEMON_URL` unconditionally, so in a
+ * Deployment that sets it — which every container Deployment must, or no
+ * worker can find the daemon — the daemon's own self-calls went to the
+ * WORKER-FACING listener. That listener serves nine routes, so every hosted
+ * tool connected successfully and then failed: measured live, `mail_send`
+ * returned `daemonFetch POST /api/mail/send -> 404: {"error":"not found"}`,
+ * which is the worker gate's own 404.
+ *
+ * `worker-listener.ts` assumed this could not happen — "their handlers now run
+ * INSIDE the daemon, so their `daemonFetch` calls are self-calls and never
+ * cross a network". True of the process, not of the URL.
+ *
+ * A process-scoped flag rather than a parameter threaded through fourteen
+ * servers: the daemon states once that it is the daemon, and a worker never
+ * does, so the default stays correct for the worker path.
+ */
+let runningInDaemon = false;
+
+/** Called once by the daemon at boot. Self-calls then resolve to loopback. */
+export function markDaemonSelfCalls(): void {
+  runningInDaemon = true;
+}
+
+/** Test-only: the flag is process-scoped, so a suite must be able to clear it. */
+export function __resetDaemonSelfCallsForTest(): void {
+  runningInDaemon = false;
+}
+
+/** Where a `daemonFetch` from THIS process should go. */
+export function daemonFetchBase(port: number, env: NodeJS.ProcessEnv = process.env): string {
+  return runningInDaemon ? `http://127.0.0.1:${port}` : resolveDaemonBaseUrl(port, env);
+}
+
 export async function daemonFetch<T = unknown>(opts: DaemonFetchOptions): Promise<T> {
   // FRI-2037: the host is configuration, not a constant — see
   // `resolveDaemonBaseUrl`. Default is byte-identical to the old literal.
-  const url = `${resolveDaemonBaseUrl(opts.port)}${opts.path}`;
+  const url = `${daemonFetchBase(opts.port)}${opts.path}`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
     [DAEMON_SECRET_HEADER]: getDaemonSecret(),
