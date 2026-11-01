@@ -622,8 +622,20 @@ resolving to a mix of allowed and blocked addresses is refused outright, since
 that shape is what rebinding looks like.
 
 Because the builder cannot resolve external names itself, it does not need to:
-the proxy resolves on its behalf, which is ordinary CONNECT semantics. A tool
-that ignores `HTTPS_PROXY` fails closed.
+the proxy resolves on its behalf, which is ordinary CONNECT semantics.
+
+**The coverage limit, measured.** The proxy is _advertised_ through
+`HTTPS_PROXY`, so it only reaches clients that honour that convention. `npm`,
+`git` and `curl` do. **Node 22's global `fetch` does not** — pointed at a closed
+port it still fetched successfully, ignoring the variable entirely. So any
+Node-based tool, MCP server or postinstall using `fetch` gets no egress at all
+on an internal network, and fails as `ENETUNREACH` rather than with anything
+naming the cause. `WebFetch` is the concrete casualty. Tracked as FRI-2085; the
+fix is an intercepting proxy rather than an advertised one.
+
+Every cross-boundary surface, the credential it needs and the pattern it uses
+are registered in [docs/network-surfaces.md](network-surfaces.md); ADR-055 is
+the rule that a new external call is classified there before it is built.
 
 ### Verifying it in a real container
 

@@ -128,7 +128,8 @@ against the private, loopback, link-local, CGNAT and multicast ranges, and the
 socket is opened to **an address that was checked rather than the name that was
 allowed**. Redirects are not followed, since a `302` inward would turn a
 checked request into an unchecked one. Full detail in
-[docs/running.md](running.md) § Egress.
+[docs/running.md](running.md) § Egress, and every surface's credential and
+pattern in [docs/network-surfaces.md](network-surfaces.md) (ADR-055).
 
 ## What the daemon stopped handing out (FRI-2059)
 
@@ -304,8 +305,22 @@ is developed.
 
 5. **The proxy is in the trusted tier.** The daemon's own reachability is the
    builder's ceiling, bounded by the allowlist and the address check rather
-   than by topology. The alternative — a sidecar proxy — needs its own auth and
-   supervision for no additional property.
+   than by topology. A dedicated egress container is ADR-055's declared
+   destination for this.
+
+6. **The proxy only reaches clients that honour `HTTPS_PROXY`.** Measured:
+   Node 22's global `fetch` ignores it, so `WebFetch` and any Node-based tool
+   or MCP server using `fetch` have no egress at all — failing as
+   `ENETUNREACH`, which does not name the cause. FRI-2085.
+
+7. **A containerised builder cannot authenticate to the model.** Nothing
+   supplies an Anthropic credential, so it clones its workspace and then
+   cannot take a turn. FRI-2084. This is the gap that prompted ADR-055:
+   allowlisting a destination is not the same as being able to authenticate to
+   it.
+
+8. **User-configured MCP servers hold their own credentials inside the
+   container**, and call hosts no allowlist enumerates. FRI-2086.
 
 ## Deferred work
 
