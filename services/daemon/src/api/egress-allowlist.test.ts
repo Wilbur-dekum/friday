@@ -37,6 +37,14 @@ describe("the allowlist in force", () => {
     ).toEqual(["a.example", "b.example", "c.example"]);
   });
 
+  it("does not ship the model API either — FRI-2084 made it brokered", () => {
+    // The builder reaches the model through the daemon's own route, which
+    // injects the credential, so it does not need to reach Anthropic
+    // directly. Closing the credential gap SHRANK the permitted destination
+    // set rather than growing it, which is the shape ADR-055 rule 2 wants.
+    expect(DEFAULT_EGRESS_ALLOWLIST).not.toContain("api.anthropic.com");
+  });
+
   it("does not ship the git host — the daemon serves git now", () => {
     // FRI-2076/2077 put git behind the daemon's route and FRI-2078 the GitHub
     // API, so the ticket's original "allowlist the git host" is obsolete. If

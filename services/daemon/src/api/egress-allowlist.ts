@@ -40,8 +40,13 @@ import { isIP } from "node:net";
  * place rather than being the union of a default and a local override.
  */
 export const DEFAULT_EGRESS_ALLOWLIST: readonly string[] = [
-  // The model. Irreducible: the Claude SDK runs in the worker.
-  "api.anthropic.com",
+  // NOT `api.anthropic.com`. FRI-2084 made model access `brokered` — the
+  // builder sends model traffic to the daemon's own route, which injects the
+  // credential — so the model is reachable without the builder being able to
+  // reach Anthropic directly. That is the shape ADR-055 rule 2 wants: closing
+  // the credential gap SHRANK the permitted destination set instead of
+  // growing it.
+  //
   // Package registries. `registry.npmjs.org` serves metadata; tarballs come
   // from the same host today, and the CDN is listed because npm has served
   // them from there historically and a build that hits it fails closed.

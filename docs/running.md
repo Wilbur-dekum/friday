@@ -607,10 +607,13 @@ hop-by-hop and always stripped, and `Authorization` is stripped only when it
 was what authenticated the proxy — otherwise it is the builder's own upstream
 credential (a private registry token) and passing it through is the point.
 
-The default list is `api.anthropic.com` plus the npm/yarn registries — and
-notably **not** a git host, because FRI-2076/2077 put git behind the daemon's
-own route and FRI-2078 did the same for the GitHub API, so a builder reaches
-neither directly.
+The default list is the npm/yarn registries and **nothing else**. Not a git
+host, because FRI-2076/2077 put git behind the daemon's own route and FRI-2078
+did the same for the GitHub API. Not `api.anthropic.com` either: FRI-2084 made
+model access brokered, so the builder sends model traffic to the daemon's
+`/api/model/` route with its own worker token and the daemon injects the real
+credential. Closing that credential gap shrank the permitted destination set
+rather than growing it.
 
 A hostname allowlist alone would not be destination-based, which is what
 ADR-054 requires: `evil.example` can hold an A record pointing at the metadata

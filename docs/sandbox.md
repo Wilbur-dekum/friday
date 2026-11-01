@@ -313,9 +313,12 @@ is developed.
    or MCP server using `fetch` have no egress at all — failing as
    `ENETUNREACH`, which does not name the cause. FRI-2085.
 
-7. **A containerised builder cannot authenticate to the model.** Nothing
-   supplies an Anthropic credential, so it clones its workspace and then
-   cannot take a turn. FRI-2084. This is the gap that prompted ADR-055:
+7. **Closed (FRI-2084).** A containerised builder could not authenticate to
+   the model at all — nothing supplied an Anthropic credential, so it cloned
+   its workspace and then could not take a turn. Model access is now
+   `brokered`: the builder holds only its worker token and the daemon injects
+   the credential, which also took `api.anthropic.com` off the egress
+   allowlist. Kept here because it is the gap that prompted ADR-055 —
    allowlisting a destination is not the same as being able to authenticate to
    it.
 

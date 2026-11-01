@@ -31,6 +31,7 @@ async function loadBroker(env: Record<string, string> = {}) {
     clampGrace: (raw: unknown) => number;
     egressNoProxy: (proxyUrl: string) => string;
     egressProxyUrl: (base: string, token?: string) => string;
+    egressModelBaseUrl: (proxyUrl: string) => string | null;
   };
 }
 
@@ -230,6 +231,59 @@ describe("egress (FRI-2039)", () => {
     const { egressProxyUrl } = await loadBroker({});
     expect(egressProxyUrl("http://friday:7611", undefined)).toBe("http://friday:7611");
     expect(egressProxyUrl("not-a-url", "tok")).toBe("not-a-url");
+  });
+
+  it("points the SDK at the daemon's model route and hands it the worker token", async () => {
+    // FRI-2084: the builder gets no Anthropic key. It gets the daemon's route
+    // plus its OWN worker token, which the daemon swaps for the real
+    // credential. `ANTHROPIC_AUTH_TOKEN` is how the SDK sends a bearer rather
+    // than an `x-api-key`, and that bearer is the header the daemon already
+    // authenticates workers with.
+    const build = await loadSpecBuilder({ BROKER_EGRESS_PROXY: "http://friday:7611" });
+    const env = envOf(build("task-1", { FRIDAY_WORKER_TOKEN: "tok-123" }));
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://friday:7611/api/model");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("tok-123");
+  });
+
+  it("never hands a builder a real Anthropic credential", async () => {
+    // The whole point of brokering. If any of these appear, the credential is
+    // in the untrusted container and the boundary is decoration.
+    const build = await loadSpecBuilder({ BROKER_EGRESS_PROXY: "http://friday:7611" });
+    const env = envOf(build("task-1", { FRIDAY_WORKER_TOKEN: "tok-123" }));
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    // And a caller cannot smuggle one in through the env it supplies.
+    const smuggled = envOf(
+      build("task-2", {
+        FRIDAY_WORKER_TOKEN: "tok-123",
+        ANTHROPIC_API_KEY: "sk-smuggled",
+        ANTHROPIC_BASE_URL: "http://evil.example",
+        ANTHROPIC_AUTH_TOKEN: "attacker-token",
+      } as never),
+    );
+    expect(smuggled.ANTHROPIC_API_KEY).toBeUndefined();
+    // Broker-set values win: a caller that could choose the base URL could
+    // point the worker token at a host of its own.
+    expect(smuggled.ANTHROPIC_BASE_URL).toBe("http://friday:7611/api/model");
+    expect(smuggled.ANTHROPIC_AUTH_TOKEN).toBe("tok-123");
+  });
+
+  it("strips credentials from the proxy URL when deriving the model base", async () => {
+    // The proxy URL carries userinfo so ordinary tools authenticate; the model
+    // route authenticates by bearer instead, so the base must not leak a
+    // second copy of the token into another variable.
+    const { egressModelBaseUrl } = await loadBroker({});
+    expect(egressModelBaseUrl("http://x-friday:tok@friday:7611")).toBe(
+      "http://friday:7611/api/model",
+    );
+    expect(egressModelBaseUrl("not-a-url")).toBeNull();
+  });
+
+  it("offers no model route when the operator configured no proxy base", async () => {
+    delete process.env.BROKER_EGRESS_PROXY;
+    const build = await loadSpecBuilder({});
+    const env = envOf(build("task-1", { FRIDAY_WORKER_TOKEN: "tok-123" }));
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
   it("derives NO_PROXY from the proxy URL rather than a second setting", async () => {
