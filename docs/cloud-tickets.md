@@ -705,7 +705,7 @@ local tool-execution bridge is a much larger design and should be split out.
 
 ## FRI-2036 — E4: Agent isolation
 
-`epic` · ADR-054, ADR-055 · 22 tasks
+`epic` · ADR-054, ADR-055 · 24 tasks
 
 Goal: agent execution moves into containers; the container is the sandbox.
 
@@ -780,6 +780,75 @@ has run a full turn through it.** The route is tested against real sockets and
 a real streaming upstream, and the broker's env is pinned by tests, but the
 broker, a real builder image, the proxy and this route have not been in one
 loop together. `container-builder.e2e.test.ts` is where that goes.
+
+### FRI-2087 — Hosted MCP is unreachable from a containerised builder
+
+`bug` · parent FRI-2036 · ADR-055 · **blocks moving work into Friday**
+
+Found by running the full stack for the first time (broker + internal network +
+real builder image + real daemon). A containerised Builder took a turn through
+FRI-2084's brokered model route, wrote its file and reported — and said
+_"`mail_send` is not in my available tool list this session"_. The daemon logged
+**zero** MCP events.
+
+`/api/mcp/<server>` is declared `auth: true`, so `handle()` demands the shared
+daemon secret **on top of** the per-worker token `handleWorkerFacing` has
+already verified. The broker mounts only `/workspace`, so the builder has no
+`/data` — and `getDaemonSecret()` then **mints a fresh secret** instead of
+failing, producing one the daemon has never seen. Confirmed by comparing
+digests: builder `7148308e…`, daemon `f143b7ea…`.
+
+Probed from inside the container, the two rejections differ, which is what
+localises it:
+
+```
+token only            -> 401 {"error":"unauthorized"}                        (route auth)
+token + wrong secret  -> 401 {"error":"unauthorized"}
+no auth at all        -> 401 "a valid per-worker bearer token is required"   (worker gate)
+```
+
+So the token passes and the secret check is what fails.
+
+Blast radius is exactly one route — and it carries all 14 hosted servers. A
+containerised Builder can write code and **cannot** mail the orchestrator, read
+tickets, use memory, or open a PR. The git routes (FRI-2076/2077) and the model
+route (FRI-2084) work precisely because neither declares `auth: true`.
+
+**The fix follows `worker-listener.ts`'s own stated principle:** the per-worker
+token is the only thing that should authenticate on that listener, because the
+daemon secret sits on a volume any builder in the Deployment container can read
+and therefore "identifies nothing" on a network boundary. A valid worker token
+should satisfy `auth` for a worker-facing route. Mounting `/data` to make the
+secret match is the wrong fix — it hands the untrusted container the shared
+secret and the whole vault.
+
+Secondary, and worth fixing on its own: `getDaemonSecret()` creating a secret
+when the file is absent turns a hard failure into a silent mismatch. In a
+process that has no business holding one, absent should mean absent.
+
+### FRI-2088 — Archiving a containerised Builder leaks its container and volume
+
+`bug` · parent FRI-2036
+
+Measured in the same live run. Archiving returned 200 and the worker process
+exited cleanly — but the container was never removed and the per-task volume
+`friday-builder-<task>` was still present. The broker logs `builder.removed` on
+its `DELETE /builders/<taskId>` handler, which stops the container and then
+removes it with `?v=1` (taking the volume); no such line appears, so
+`terminate()` never reached the broker.
+
+Why it still looks clean: losing the command channel makes the worker exit, so
+the process stops correctly and only a container-and-volume count reveals it.
+
+Narrowed cause — archive teardown in `lifecycle.ts` is written for the
+forked-worker model: it signals the process group with a 5s/+2s escalation. A
+container handle has no local process group, so that path cannot tear one down,
+and the handle's `terminate()` — which maps SIGTERM/SIGKILL onto the broker's
+DELETE with a grace query — is not invoked on the archive path. Symptom and the
+broker-log absence are measured; the code path is not fully traced.
+
+`AutoRemove: false` is deliberate ("teardown is explicit, so exit status is
+observable"), which is correct only if something explicit actually removes it.
 
 ### FRI-2085 — `relayed` egress does not reach clients that ignore proxy env
 
