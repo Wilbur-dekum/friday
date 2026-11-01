@@ -322,6 +322,7 @@ is developed.
 8. **User-configured MCP servers hold their own credentials inside the
    container**, and call hosts no allowlist enumerates. FRI-2086.
 
+
 ## Deferred work
 
 - **Daemon-side enforcement plane** for M1 (residual #1).
