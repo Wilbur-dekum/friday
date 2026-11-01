@@ -56,6 +56,11 @@ const GOLDEN: string[] = [
   "GET /api/worker/git/info/refs",
   "POST /api/worker/git/git-upload-pack",
   "POST /api/worker/git/git-receive-pack",
+  // FRI-2084: brokered model access. The builder holds no Anthropic
+  // credential; the daemon injects it, so this is how a containerised Builder
+  // takes a turn at all.
+  "POST re:^\\/api\\/model\\/.+$",
+  "GET re:^\\/api\\/model\\/.+$",
   "POST /api/elicitation/wait",
   "POST fn:predicate",
   "POST /api/internal/cancel-queued",
@@ -177,6 +182,9 @@ const GOLDEN_RAW: string[] = [
   "GET /api/worker/git/info/refs",
   "POST /api/worker/git/git-upload-pack",
   "POST /api/worker/git/git-receive-pack",
+  // A turn is a long SSE response: the handler owns req/res and streams.
+  "POST re:^\\/api\\/model\\/.+$",
+  "GET re:^\\/api\\/model\\/.+$",
 ];
 
 describe("ROUTES contract", () => {
@@ -194,7 +202,7 @@ describe("ROUTES contract", () => {
     const added = [...actual].filter((k) => !golden.has(k));
     expect({ dropped, added }).toEqual({ dropped: [], added: [] });
     expect(ROUTES.length).toBe(GOLDEN.length);
-    expect(ROUTES.length).toBe(89);
+    expect(ROUTES.length).toBe(91);
   });
 
   it("orders every specific route before the broad regex that would swallow it", () => {
@@ -228,7 +236,7 @@ describe("ROUTES contract", () => {
     expect(gated.size).toBe(22);
   });
 
-  it("marks EXACTLY the 9 streaming/binary/seam routes as raw (owns req/res)", () => {
+  it("marks EXACTLY the 11 streaming/binary/seam routes as raw (owns req/res)", () => {
     const raw = new Set(ROUTES.filter((r) => r.raw != null).map(rowKey));
     expect([...raw].sort()).toEqual([...GOLDEN_RAW].sort());
     // raw rows own the response: they carry no JSON handler/schema.

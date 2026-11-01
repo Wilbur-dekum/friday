@@ -186,6 +186,7 @@ import {
 import { attachEgressProxy, createHttpEgressHandler } from "./worker-egress.js";
 import { attachWorkerChannel } from "./worker-channel.js";
 import { handleWorkerGit } from "./worker-git.js";
+import { handleModelProxy } from "./model-proxy.js";
 import {
   createPullRequest,
   parseGitHubRemote,
@@ -477,6 +478,21 @@ export const ROUTES: RouteRow[] = [
     method: "POST",
     match: "/api/worker/git/git-receive-pack",
     raw: (ctx) => handleWorkerGit(ctx),
+  },
+
+  // --- Brokered model access (FRI-2084, ADR-055) ---
+  // Raw: a turn is a long SSE response, so the handler owns req/res and
+  // streams. The upstream HOST is fixed; the caller chooses only the path,
+  // and that is matched against an allowlist rather than concatenated.
+  {
+    method: "POST",
+    match: /^\/api\/model\/.+$/,
+    raw: (ctx) => handleModelProxy(ctx.req, ctx.res),
+  },
+  {
+    method: "GET",
+    match: /^\/api\/model\/.+$/,
+    raw: (ctx) => handleModelProxy(ctx.req, ctx.res),
   },
 
   {

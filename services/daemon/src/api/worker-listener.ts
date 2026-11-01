@@ -79,6 +79,18 @@ export const WORKER_FACING_ROUTES: readonly WorkerRoute[] = [
   },
   {
     method: "POST",
+    match: (p) => p.startsWith("/api/model/"),
+    reason:
+      "FRI-2084: brokered model access. A containerised builder holds no Anthropic " +
+      "credential — the daemon injects it — so this is how it takes a turn at all",
+  },
+  {
+    method: "GET",
+    match: (p) => p.startsWith("/api/model/"),
+    reason: "FRI-2084: the model catalog, same brokered path",
+  },
+  {
+    method: "POST",
     match: (p) => p === "/api/elicitation/wait",
     reason:
       "friday-elicitation is the one server that cannot be hosted (FRI-2074): " +
