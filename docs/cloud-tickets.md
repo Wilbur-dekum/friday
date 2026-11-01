@@ -705,7 +705,7 @@ local tool-execution bridge is a much larger design and should be split out.
 
 ## FRI-2036 — E4: Agent isolation
 
-`epic` · ADR-054 · 19 tasks
+`epic` · ADR-054, ADR-055 · 22 tasks
 
 Goal: agent execution moves into containers; the container is the sandbox.
 
@@ -720,6 +720,94 @@ and once E3 lands it is driven by any User over any Transport. E3 before E4 is a
 deliberate, time-boxed exposure, not an oversight.
 
 Coarse by design — refine when reached.
+
+### FRI-2084 — A containerised builder has no model credential, so it cannot take a turn
+
+`bug` · parent FRI-2036 · ADR-055 · **blocks moving work into Friday**
+
+The broker's `ALLOWED_ENV` permits five keys and `container-runtime.ts` sends
+exactly those five — `FRIDAY_WORKER_TOKEN`, `FRIDAY_DAEMON_URL`,
+`FRIDAY_AGENT_NAME`, `FRIDAY_TASK_ID`, `FRIDAY_WORKSPACE_BRANCH`. None is an
+Anthropic credential. The image carries none either (verified: `env` in the
+built image matches nothing on `anthropic|claude|token|key`), and
+`claudeCodeChildEnv()` can only pass through what the worker already holds.
+
+So a containerised Builder starts, clones `/workspace` successfully, and then
+cannot authenticate the SDK. The symptom is the one `docker-compose.yml`
+already documents for the daemon: `Not logged in · Please run /login`, which
+the daemon rewrites as an assistant block and retries forever.
+
+FRI-2039 put `api.anthropic.com` on the egress allowlist, which made the
+destination reachable and said nothing about authenticating to it. That
+distinction is why ADR-055 exists.
+
+Two ways to close it, and ADR-055 requires choosing deliberately rather than
+reaching for the easy one:
+
+1. **`brokered`** — point `ANTHROPIC_BASE_URL` at the daemon, which injects the
+   credential and forwards. The builder holds nothing, and
+   `api.anthropic.com` leaves the egress allowlist entirely, which is strictly
+   tighter than what shipped. Cost: a streaming proxy on the turn hot path
+   (SSE passthrough, latency, reliability).
+2. **A named `caller-held` exception** — add the three Anthropic keys to
+   `ALLOWED_ENV`. Roughly one line, unblocks dogfooding immediately, and puts
+   the model credential in the untrusted container where the Bash tool can read
+   it. ADR-054 and FRI-2059 already accept exactly this risk for the forked
+   worker; this extends it to the place untrusted code is most expected to run.
+   Permitted only as a time-boxed exception with (1) filed as the real fix.
+
+### FRI-2085 — `relayed` egress does not reach clients that ignore proxy env
+
+`bug` · parent FRI-2036 · ADR-055
+
+FRI-2039's proxy is advertised through `HTTPS_PROXY`, so it only reaches
+clients that honour that convention. Measured on the pinned runtime, with the
+proxy pointed at a closed port:
+
+```
+fetch SUCCEEDED (status 200) -> proxy env IGNORED
+node v22.21.1
+```
+
+`npm`, `git` and `curl` honour it; **Node 22's global `fetch` does not.** So
+any Node-based tool, MCP server or postinstall using `fetch` gets no egress at
+all on an internal network — and fails as `ENETUNREACH`, which does not name
+its cause.
+
+The concrete casualty is **`WebFetch`**, which is an enabled tool
+(`disallowedTools` lists only `Task`). Also unknown and in scope here:
+**`WebSearch`** — whether it executes server-side at Anthropic, in which case
+the container never egresses for it, or client-side, in which case it is
+broken the same way.
+
+The obvious workaround is the one thing the broker must not do: `NODE_OPTIONS`
+with a preload that installs an `EnvHttpProxyAgent` is exactly the
+code-execution vector that keeps `NODE_OPTIONS` off `ALLOWED_ENV` and makes
+image pinning meaningful. So the fix is an **intercepting** proxy rather than
+an advertised one, which is ADR-055's declared destination.
+
+### FRI-2086 — User-configured MCP servers are unbounded external calls with keys in the untrusted tier
+
+`task` · parent FRI-2036 · ADR-055
+
+`McpServerConfig` is `{ name, command, args?, env?, scope? }` — **stdio only**.
+There is no remote-MCP shape, so a user-configured server is arbitrary code
+running inside the builder, holding its own API credential in its own `env`,
+calling a host nobody enumerated.
+
+That breaks two ADR-055 rules at once: a `caller-held` credential in an
+untrusted process, and a destination that cannot be added to an allowlist
+ahead of time because the set is open. It is the one row in the register that
+cannot be closed by listing more hosts.
+
+ADR-055 says a User's own third-party credential is `brokered` — the daemon
+holds it and the server reaches its API through the daemon. That implies a
+credential-injecting broker per configured server, which is a service rather
+than a config knob, and is the strongest argument for the dedicated egress
+container ADR-055 names as its destination.
+
+Also covers private package registries, which have the same shape: a registry
+token is a User credential and today would have to sit in the container.
 
 ### FRI-2037 — Worker boundary as a protocol seam
 

@@ -85,6 +85,15 @@ In `~/.friday/config.json`:
 
 - Stdio transport only (the `command` / `args` / `env` shape). HTTP/SSE
   transports aren't wired yet.
+- **In container mode this is an open hole (FRI-2086, ADR-055).** Stdio means
+  the server runs _inside_ the builder container, so the `env` credential above
+  — `GCAL_TOKEN` in the example — sits in the untrusted tier where the agent's
+  Bash tool can read it, and the API host it calls is not on the egress
+  allowlist, so the call fails closed anyway. ADR-055's rule is that a User's
+  own third-party credential is `brokered`: the daemon holds it and the server
+  reaches its API through the daemon. That is not built. Until it is,
+  user-configured MCP servers are a laptop/forked-worker feature, not a
+  containerised-builder one.
 - `scope` restricts by agent type. Empty or missing = all agent types.
 - Names starting with `friday-` are reserved for in-process built-ins. The
   name `playwright` is also reserved (built-in browser MCP). Reserved names

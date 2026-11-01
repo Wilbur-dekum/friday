@@ -405,18 +405,19 @@ Verifies the data dir, config, db migrations, account presence, external CLIs, a
 
 ## Documentation
 
-| Doc                                                      | What's in it                                                                                                       |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| [docs/architecture.md](docs/architecture.md)             | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle                               |
-| [docs/chat-ux.md](docs/chat-ux.md)                       | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown                                        |
-| [docs/mobile-ux.md](docs/mobile-ux.md)                   | Priority+ nav, virtualization, PWA, mobile autocomplete                                                            |
-| [docs/mcp.md](docs/mcp.md)                               | MCP server surface (Friday-internal + user-configured)                                                             |
-| [docs/sandbox.md](docs/sandbox.md)                       | Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk |
-| [docs/decisions.md](docs/decisions.md)                   | Architecture Decision Records (ADRs) + watch list                                                                  |
-| [docs/roadmap.md](docs/roadmap.md)                       | Open work, sequenced for execution                                                                                 |
-| [docs/cloud-plan.md](docs/cloud-plan.md)                 | Cloud/SaaS project plan: epics, sequencing, parallelization                                                        |
-| [docs/cloud-tickets.md](docs/cloud-tickets.md)           | Canonical verbose cloud/SaaS plan: all tickets with their constraints                                              |
-| [docs/setup.md](docs/setup.md)                           | Full setup including Cloudflare Tunnel walkthrough                                                                 |
-| [docs/running.md](docs/running.md)                       | Daily commands, modes, data layout, cutover from old Friday                                                        |
-| [docs/self-hosted-runner.md](docs/self-hosted-runner.md) | Intel x64 self-hosted GitHub Actions runner that builds the `darwin-x64` release leg                               |
-| [docs/ui-conventions.md](docs/ui-conventions.md)         | Cross-cutting UI patterns and icon map                                                                             |
+| Doc                                                      | What's in it                                                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| [docs/architecture.md](docs/architecture.md)             | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle                                            |
+| [docs/chat-ux.md](docs/chat-ux.md)                       | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown                                                     |
+| [docs/mobile-ux.md](docs/mobile-ux.md)                   | Priority+ nav, virtualization, PWA, mobile autocomplete                                                                         |
+| [docs/mcp.md](docs/mcp.md)                               | MCP server surface (Friday-internal + user-configured)                                                                          |
+| [docs/sandbox.md](docs/sandbox.md)                       | Worker isolation, organised around the container as the boundary; forked worker vs containerised builder, egress, residual risk |
+| [docs/network-surfaces.md](docs/network-surfaces.md)     | Every cross-boundary call: ingress/egress, internal vs external, which credential, and which of the four ADR-055 patterns       |
+| [docs/decisions.md](docs/decisions.md)                   | Architecture Decision Records (ADRs) + watch list                                                                               |
+| [docs/roadmap.md](docs/roadmap.md)                       | Open work, sequenced for execution                                                                                              |
+| [docs/cloud-plan.md](docs/cloud-plan.md)                 | Cloud/SaaS project plan: epics, sequencing, parallelization                                                                     |
+| [docs/cloud-tickets.md](docs/cloud-tickets.md)           | Canonical verbose cloud/SaaS plan: all tickets with their constraints                                                           |
+| [docs/setup.md](docs/setup.md)                           | Full setup including Cloudflare Tunnel walkthrough                                                                              |
+| [docs/running.md](docs/running.md)                       | Daily commands, modes, data layout, cutover from old Friday                                                                     |
+| [docs/self-hosted-runner.md](docs/self-hosted-runner.md) | Intel x64 self-hosted GitHub Actions runner that builds the `darwin-x64` release leg                                            |
+| [docs/ui-conventions.md](docs/ui-conventions.md)         | Cross-cutting UI patterns and icon map                                                                                          |
